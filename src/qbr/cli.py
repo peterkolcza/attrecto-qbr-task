@@ -249,8 +249,23 @@ def smoke_test(
 
 @app.command(name="seed-demo")
 def seed_demo() -> None:
-    """Seed demo data for the web dashboard."""
-    console.print("[yellow]Demo seeding not yet implemented (issue #14).[/yellow]")
+    """Show demo project data that will be pre-loaded in the dashboard."""
+    from qbr.seed import get_demo_projects
+
+    projects = get_demo_projects()
+    console.print(f"[cyan]Demo data: {len(projects)} projects[/cyan]\n")
+    for proj in projects:
+        table = Table(title=proj["name"], show_header=True)
+        table.add_column("Field", style="cyan")
+        table.add_column("Value")
+        table.add_row("PM", proj["pm"])
+        table.add_row("Team size", str(proj["team_size"]))
+        table.add_row("QBR date", proj["qbr_date"])
+        table.add_row("Q3 focus", proj["q3_focus"])
+        table.add_row("Known risks", proj["known_risks"])
+        table.add_row("Email threads", str(proj["email_threads"]))
+        console.print(table)
+        console.print()
 
 
 if __name__ == "__main__":

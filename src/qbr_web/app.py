@@ -25,6 +25,7 @@ from qbr.models import ExtractedItem  # noqa: TC001
 from qbr.parser import parse_all_emails
 from qbr.pipeline import run_pipeline_for_thread
 from qbr.report import build_report_json, generate_report
+from qbr.seed import get_demo_projects
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ async def index(request: Request):
         context={
             "jobs": list(jobs.items()),
             "has_sample_data": SAMPLE_DATA_DIR.exists(),
+            "projects": get_demo_projects(),
         },
     )
 
