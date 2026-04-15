@@ -99,15 +99,26 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
     job["state"] = "processing"
 
     try:
-        provider = os.getenv("QBR_LLM_PROVIDER", "anthropic")
+        provider = os.getenv("QBR_LLM_PROVIDER", "ollama")
+        ollama_model = os.getenv("OLLAMA_MODEL", "gemma4:e2b")
         tracker = UsageTracker()
         client = create_client(
             provider=provider,
             api_key=os.getenv("ANTHROPIC_API_KEY"),
             ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-            ollama_model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+            ollama_model=ollama_model,
             tracker=tracker,
         )
+
+        # Resolve model names based on provider
+        if provider == "ollama":
+            extraction_model = ollama_model
+            synthesis_model = ollama_model
+        else:
+            from qbr.llm import SONNET_MODEL
+
+            extraction_model = HAIKU_MODEL
+            synthesis_model = SONNET_MODEL
 
         # Step 1: Parse
         _log_progress(job, "Parsing emails...")
@@ -125,7 +136,7 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
             _log_progress(job, f"[{i + 1}/{len(threads)}] Processing: {thread.subject[:60]}...")
             try:
                 items = await asyncio.to_thread(
-                    run_pipeline_for_thread, thread, client, [], HAIKU_MODEL
+                    run_pipeline_for_thread, thread, client, [], extraction_model
                 )
                 project = thread.project or "Unknown"
                 all_items[project].extend(items)
@@ -144,8 +155,10 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
         _log_progress(job, f"{total_flags} flags triggered")
 
         # Step 4: Generate report
-        _log_progress(job, "Generating report (Sonnet 4.6)...")
-        report_md = await asyncio.to_thread(generate_report, flags_by_project, client)
+        _log_progress(job, f"Generating report ({synthesis_model})...")
+        report_md = await asyncio.to_thread(
+            generate_report, flags_by_project, client, synthesis_model
+        )
         report_json = build_report_json(flags_by_project, report_md)
 
         job["state"] = "complete"
