@@ -2,110 +2,197 @@
 
 Automated system that analyzes project email communications and generates a **Portfolio Health Report** for a Director of Engineering's Quarterly Business Review (QBR). Surfaces unresolved action items, emerging risks, and blockers across multiple projects — with full source attribution.
 
-## Quick Start
+## Prerequisites
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| **Python** | ≥ 3.12 | `python3 --version` |
+| **uv** | any | [Install uv](https://docs.astral.sh/uv/getting-started/installation/) — `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| **Ollama** | any | [Install Ollama](https://ollama.com/download) — required for the default local LLM provider |
+| **gemma4 model** | e2b (2B) or larger | `ollama pull gemma4:e2b` — fits in ~4GB RAM. For better quality: `ollama pull gemma4:26b` (needs ~16GB) |
+
+**Optional:** Anthropic API key if you want to use Claude models instead of Ollama.
+
+## Installation
 
 ```bash
-# Prerequisites: Python ≥ 3.12, uv (https://docs.astral.sh/uv/)
-
-# Install
+# 1. Clone the repository
 git clone https://github.com/peterkolcza/attrecto-qbr-task.git
 cd attrecto-qbr-task
+
+# 2. Install Python dependencies
 make install
+# This runs: uv sync --all-extras
 
-# Configure
+# 3. Pull the default LLM model
+ollama pull gemma4:e2b
+
+# 4. Configure environment
 cp .env.example .env
-# Edit .env: set ANTHROPIC_API_KEY or QBR_LLM_PROVIDER=ollama
+# Default config uses Ollama + gemma4:e2b — no API key needed
+# Edit .env to change model or switch to Anthropic
+```
 
-# Run on sample data
-make run
+### Verify installation
 
-# Run with full debug output (prompts, responses, tokens)
-make run-debug
+```bash
+# Run test suite (125 tests)
+make test
+
+# Verify LLM connection
+uv run qbr smoke-test
 ```
 
 ## Usage
 
+### CLI — Generate a Portfolio Health Report
+
 ```bash
-# Full pipeline: parse → extract → classify → report
-qbr run --input task/sample_data --output reports/
+# Run the full pipeline on the 18 sample emails
+uv run qbr run
 
-# With Ollama (local, no API key needed)
-qbr run --provider ollama
+# Shorthand via Makefile
+make run
 
-# Debug mode: shows all prompts, LLM responses, token usage
-qbr run --debug
-
-# Smoke test: verify LLM provider connection
-qbr smoke-test --provider anthropic
+# With debug output (shows all prompts, LLM responses, token counts)
+make run-debug
 ```
 
-### Example Output
+The CLI processes emails through a 4-step pipeline and shows real-time progress:
 
 ```
-╭──── QBR ────╮
-│ QBR Portfolio Health Analyzer v0.1.0         │
-│ Provider:    Anthropic (Haiku 4.5 → Sonnet)  │
-│ Pipeline:    3-stage extraction + 2 Flags     │
-│ Security:    Spotlighting + dual-LLM          │
-╰──────────────────────────────────────────────╯
+╭──────────────────────── QBR ────────────────────────╮
+│ QBR Portfolio Health Analyzer v0.1.0                │
+│ ────────────────────────────────────────            │
+│ Provider:    Ollama (Local model)                   │
+│ Pipeline:    3-stage extraction + 2 Attention Flags │
+│ Security:    Spotlighting + dual-LLM quarantine     │
+│ Caching:     N/A                                    │
+│ Debug:       OFF                                    │
+╰─────────────────────────────────────────────────────╯
 
 ✓ Parsed 18 threads across 3 projects
-✓ Extracted 47 items, 23 open
-      → Project Phoenix: 15 items (8 open)
-      → Project Omicron: 18 items (9 open)
-      → DivatKirály: 14 items (6 open)
-✓ 7 flags triggered
-      → Flag 1 (Unresolved Actions): 4 items
-      → Flag 2 (Risks/Blockers): 3 items
+✓ Extracted 78 items, 19 open
+      → Project Phoenix: 27 items (8 open)
+      → Project Omicron: 28 items (8 open)
+      → DivatKirály: 23 items (3 open)
+✓ 16 flags triggered
+      → Flag 1 (Unresolved Actions): 14 items
+      → Flag 2 (Risks/Blockers): 2 items
 ✓ Report saved:
-      → Markdown: reports/portfolio_20250630_120000.md
-      → JSON: reports/portfolio_20250630_120000.json
+      → Markdown: reports/portfolio_20260415_222223.md
+      → JSON: reports/portfolio_20260415_222223.json
+
+     Token Usage Summary
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ Metric          ┃   Value ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ Total LLM calls │      37 │
+│ Input tokens    │  45,032 │
+│ Output tokens   │  22,728 │
+│ Estimated cost  │ $0.4760 │
+└─────────────────┴─────────┘
 ```
+
+### CLI Options
+
+```bash
+uv run qbr run --help
+
+Options:
+  --input TEXT      Path to email directory [default: task/sample_data]
+  --output TEXT     Output directory for reports [default: reports/]
+  --provider TEXT   LLM provider: anthropic or ollama [default: from .env]
+  --debug           Enable debug mode with full prompt/response traces
+```
+
+### Other commands
+
+```bash
+uv run qbr smoke-test          # Verify LLM provider connection
+uv run qbr seed-demo           # Show pre-loaded project data
+```
+
+### Web UI
+
+```bash
+make web
+# Opens at http://localhost:8000
+```
+
+The web dashboard shows:
+- **Portfolio overview**: 3 pre-loaded projects with team rosters and known risks
+- **"Process Demo Emails" button**: runs the full pipeline with real-time SSE progress
+- **Report view**: rendered Markdown + flag sidebar with severity indicators
+
+## Configuration
+
+Edit `.env` to change settings:
+
+```bash
+# Provider: "ollama" (default, local) or "anthropic" (cloud)
+QBR_LLM_PROVIDER=ollama
+
+# Ollama settings
+OLLAMA_HOST=http://localhost:11434
+OLLAMA_MODEL=gemma4:e2b        # 2B model, fast, fits anywhere
+# OLLAMA_MODEL=gemma4:26b      # 26B model, better quality, needs 16GB+ RAM
+
+# Anthropic (if using Claude)
+# ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+### Recommended models by RAM
+
+| RAM | Ollama Model | Quality | Speed |
+|-----|-------------|---------|-------|
+| 4 GB | `gemma4:e2b` | Good | Fast |
+| 8 GB | `gemma4:e4b` | Better | Fast |
+| 16 GB | `gemma4:26b` | Very good | Medium |
+| 24 GB+ | `gemma4:31b` | Excellent | Slower |
+| Cloud | Claude Haiku 4.5 + Sonnet 4.6 | Best | Fast |
 
 ## Architecture
 
 ```
-Email files → Parser → [Haiku] Extraction → [Haiku] Resolution → [Python] Aging → Flags → [Sonnet] Report
-                         ↑ QUARANTINE ZONE ↑                                        ↑ PRIVILEGED ZONE ↑
+Email files → Parser → [LLM] Extraction → [LLM] Resolution → [Python] Aging → Flags → [LLM] Report
+                        ↑ QUARANTINE ZONE ↑                                     ↑ PRIVILEGED ZONE ↑
 ```
 
 **3-stage pipeline per thread:**
-1. **Extraction** (Haiku 4.5): quote-first-then-analyze — finds commitments, questions, risks, blockers
-2. **Resolution tracking** (Haiku 4.5): determines if each item was resolved within the thread
+1. **Extraction**: quote-first-then-analyze — finds commitments, questions, risks, blockers
+2. **Resolution tracking**: determines if each item was resolved within the thread
 3. **Aging & severity** (deterministic Python): computes days open, role-based severity scoring
 
 **2 Attention Flags:**
 - **Unresolved High-Priority Action Items** — things that fell through the cracks
 - **Emerging Risks / Blockers** — problems without a resolution path
 
+**Security:** 3-layer defense — spotlighting delimiters, input sanitization, output grounding (fuzzy quote matching)
+
 See [`Blueprint.md`](Blueprint.md) for the full architectural design, prompt texts, and trade-off analysis.
 
 ## AI Model Choices & Justification
 
-### Why Anthropic Claude
+### Default: Ollama + Gemma 4
 
-1. **Instruction-following quality**: Claude excels at structured extraction from messy real-world text — critical for parsing multi-threaded email conversations with mixed languages and inconsistent formatting.
+The default configuration uses **Ollama with Google's Gemma 4** model family. This was chosen because:
+- **Zero cost**: runs locally, no API key or cloud subscription needed
+- **Privacy**: email data never leaves your machine
+- **Good quality**: Gemma 4 (even the 2B variant) handles structured extraction well
+- **Scalable**: on a 24GB Oracle VPS, `gemma4:26b` provides near-cloud quality
 
-2. **Prompt caching**: Anthropic's ephemeral caching (`cache_control`) reduces input costs by ~90% when the system prompt is reused across email threads. This is a concrete cost advantage over providers that don't offer prompt-level caching.
+### Alternative: Anthropic Claude
 
-3. **Structured outputs**: Claude's tool-use based structured output guarantees schema-valid JSON, eliminating parse errors that plague free-text JSON generation.
+For production/cloud use, the system supports **Claude Haiku 4.5** (extraction) and **Claude Sonnet 4.6** (synthesis):
+- **Best quality**: Claude excels at structured extraction from messy multilingual text
+- **Prompt caching**: ~90% input cost reduction when system prompt is reused
+- **Structured outputs**: guaranteed schema-valid JSON via tool-use
+- **Cost**: ~$0.40 per run on 18 emails (with Haiku/Sonnet tier split)
 
-4. **Tiered model lineup**: Haiku 4.5 for cheap extraction ($1/M input) + Sonnet 4.6 for high-quality synthesis ($3/M input) — a natural cost/quality split that maps directly to our pipeline stages.
+### Provider-agnostic design
 
-### Why Haiku for Extraction, Sonnet for Synthesis
-
-- **Extraction** (find quotes, classify items) is a structured, low-reasoning task. Haiku 4.5 matches Sonnet 4's extraction accuracy at 1/3 the cost.
-- **Synthesis** (cross-project patterns, executive summary) needs nuanced reasoning and writing quality. Sonnet 4.6 is justified for this single high-value call per run.
-
-### Ollama as Fallback
-
-The system supports Ollama (e.g., `llama3.1:8b`) as a local fallback for:
-- **Development**: no API key needed, instant iteration
-- **Offline operation**: the system works without internet access
-- **Cost management**: zero-cost option for testing and non-critical runs
-- **Vendor lock-in mitigation**: proves the architecture isn't Anthropic-specific
-
-Quality is lower with local models, but the pipeline architecture is identical.
+The `LLMClient` abstraction means any provider works with the same pipeline. Switching is one env var change (`QBR_LLM_PROVIDER`).
 
 ## Project Structure
 
@@ -118,27 +205,44 @@ src/qbr/
 ├── flags.py        # Attention Flag classification
 ├── security.py     # Prompt injection defense + output grounding
 ├── report.py       # Portfolio Health Report generator
-└── models.py       # Pydantic data models
+├── models.py       # Pydantic data models
+└── seed.py         # Demo project seed data
 
+src/qbr_web/       # FastAPI + HTMX web UI
 prompts/            # Versioned LLM prompt files
-tests/              # 119 tests (parser, LLM, pipeline, flags, security, report)
+tests/              # 125 tests
 task/sample_data/   # 18 sample email threads + Colleagues.txt
+deploy/             # Oracle VPS deployment runbook + smoke test
 ```
 
 ## Development
 
 ```bash
 make install    # Install all dependencies
-make test       # Run test suite (119 tests)
+make test       # Run test suite (125 tests)
 make lint       # Ruff lint check
 make format     # Auto-fix lint + format
+make web        # Start web UI dev server
+```
+
+## Deployment (Oracle VPS)
+
+See [`deploy/README.md`](deploy/README.md) for the full step-by-step guide. Quick version:
+
+```bash
+# On the VPS:
+git clone https://github.com/peterkolcza/attrecto-qbr-task.git
+cd attrecto-qbr-task
+cp .env.prod.example .env
+# Edit .env: set QBR_DOMAIN, optionally ANTHROPIC_API_KEY
+docker compose up -d --build
 ```
 
 ## Deliverables
 
-- [x] [`Blueprint.md`](Blueprint.md) — architecture, design decisions, trade-offs
+- [x] [`Blueprint.md`](Blueprint.md) — architecture, design decisions, trade-offs (5 sections)
 - [x] [`README.md`](README.md) — setup, usage, model justification (this file)
-- [x] Working PoC: 119 tests, full pipeline CLI
+- [x] Working PoC: 125 tests, CLI + web UI, Docker deployment
 
 ## Source Material
 
