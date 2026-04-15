@@ -17,7 +17,7 @@ from rich.table import Table
 
 from qbr import __version__
 from qbr.flags import aggregate_flags_by_project
-from qbr.llm import HAIKU_MODEL, SONNET_MODEL, UsageTracker, create_client
+from qbr.llm import UsageTracker, create_hybrid_clients
 from qbr.models import ExtractedItem  # noqa: TC001 — used as type annotation at runtime
 from qbr.parser import parse_all_emails, parse_colleagues
 from qbr.pipeline import run_pipeline_for_thread
@@ -89,25 +89,27 @@ def run(
 
     _print_banner(provider, debug)
 
-    # Create LLM client
+    # Create hybrid LLM clients (extraction + synthesis)
     tracker = UsageTracker()
     api_key = os.getenv("ANTHROPIC_API_KEY")
-    client = create_client(
-        provider=provider,
+    extraction_provider = os.getenv("QBR_EXTRACTION_PROVIDER", provider)
+    synthesis_provider = os.getenv("QBR_SYNTHESIS_PROVIDER", provider)
+    ollama_model = os.getenv("OLLAMA_MODEL", "gemma4:e2b")
+
+    extraction_client, extraction_model, synthesis_client, synthesis_model = create_hybrid_clients(
+        extraction_provider=extraction_provider,
+        synthesis_provider=synthesis_provider,
         api_key=api_key,
         ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        ollama_model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+        ollama_model=ollama_model,
         tracker=tracker,
     )
 
-    # Resolve model names based on provider
-    ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-    if provider == "ollama":
-        extraction_model = ollama_model
-        synthesis_model = ollama_model
-    else:
-        extraction_model = HAIKU_MODEL
-        synthesis_model = SONNET_MODEL
+    if extraction_provider != synthesis_provider:
+        console.print(
+            f"[cyan]Hybrid mode:[/cyan] extraction={extraction_provider} ({extraction_model}), "
+            f"synthesis={synthesis_provider} ({synthesis_model})"
+        )
 
     input_path = Path(input)
     if not input_path.exists():
@@ -146,7 +148,7 @@ def run(
             try:
                 items = run_pipeline_for_thread(
                     thread,
-                    client,
+                    extraction_client,
                     colleagues=colleagues,
                     extraction_model=extraction_model,
                 )
@@ -198,7 +200,7 @@ def run(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console
     ) as progress:
         task = progress.add_task(f"[4/4] Generating report ({synthesis_model})...", total=None)
-        report_md = generate_report(flags_by_project, client, model=synthesis_model)
+        report_md = generate_report(flags_by_project, synthesis_client, model=synthesis_model)
         report_json = build_report_json(flags_by_project, report_md)
         md_path, json_path = save_report(report_md, report_json, output)
         progress.update(task, completed=True)
@@ -228,12 +230,14 @@ def smoke_test(
     console.print(f"[cyan]Smoke test for provider: {provider}[/cyan]")
 
     try:
+        from qbr.llm import create_client
+
         tracker = UsageTracker()
         client = create_client(
             provider=provider,
             api_key=os.getenv("ANTHROPIC_API_KEY"),
             ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-            ollama_model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+            ollama_model=os.getenv("OLLAMA_MODEL", "gemma4:e2b"),
             tracker=tracker,
         )
 
