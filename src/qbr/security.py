@@ -12,9 +12,14 @@ import re
 
 from rapidfuzz import fuzz
 
-# Patterns that could be prompt injection attempts
+# Patterns that could be prompt injection attempts (multi-model coverage)
 _ROLE_PATTERNS = re.compile(
-    r"\b(System|Human|Assistant|User|AI):\s",
+    r"(?:^|\n)\s*(?:System|Human|Assistant|User|AI)\s*:\s",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Additional model-specific injection markers
+_INJECTION_MARKERS = re.compile(
+    r"<<SYS>>|<\|im_start\|>|\[INST\]|### Instruction|<\|system\|>|<\|user\|>|<\|assistant\|>",
     re.IGNORECASE,
 )
 
@@ -34,6 +39,8 @@ def sanitize_email_body(body: str) -> str:
     cleaned = cleaned.replace("untrusted_email_content", "untrusted_email_c\u200bontent")
     # Neutralize role-tag patterns by adding a zero-width space
     cleaned = _ROLE_PATTERNS.sub(lambda m: m.group(0)[0] + "\u200b" + m.group(0)[1:], cleaned)
+    # Neutralize model-specific injection markers
+    cleaned = _INJECTION_MARKERS.sub(lambda m: m.group(0)[0] + "\u200b" + m.group(0)[1:], cleaned)
     return cleaned
 
 
