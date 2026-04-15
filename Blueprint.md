@@ -196,6 +196,19 @@ Four layers, from strongest to weakest:
 3. **Pydantic schema validation** — Structured output constrains response format
 4. **Dual-LLM quarantine** — synthesis LLM never sees raw email; can't hallucinate from content it doesn't have
 
+### Security Considerations
+
+The system treats all email content as **untrusted input** per OWASP LLM Top 10 guidelines.
+
+**Prompt Injection Defense (LLM01)** — 3-layer approach:
+1. **Spotlighting**: Email bodies wrapped in `<untrusted_email_content>` XML delimiters with an explicit preamble instructing the LLM to treat contents as data, not instructions. Delimiter tag names are neutralized in the input (zero-width space injection prevents escape attacks).
+2. **Input sanitization**: XML/HTML tags stripped, role-tag patterns (`System:`, `Human:`, `Assistant:`) and model-specific markers (`<<SYS>>`, `[INST]`, `<|im_start|>`) neutralized before the LLM sees the text.
+3. **Dual-LLM quarantine**: Extraction stages (which touch raw email) are isolated from the synthesis stage (which generates the final report). The synthesis LLM only receives structured `AttentionFlag` JSON — never raw email text. Even a successful injection in extraction cannot propagate to the report.
+
+**Insecure Output Handling (LLM02)**: LLM-generated Markdown is rendered through a sanitizing pipeline (`markdown` library → `bleach` HTML allowlist) before display. No raw LLM output is rendered as HTML.
+
+**Upload Security**: Filenames sanitized (directory components stripped), file size enforced (5MB server-side), file type restricted (.txt only), temporary uploads cleaned up after processing.
+
 ---
 
 ## 3. Cost & Robustness Considerations
