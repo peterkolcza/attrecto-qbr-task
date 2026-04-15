@@ -37,12 +37,12 @@
 
 | # | Severity | Finding | Status |
 |---|----------|---------|--------|
-| S10 | MEDIUM | No authentication on web app | Documented; add Caddy `basicauth` for production |
-| S11 | MEDIUM | No CSRF protection | Not exploitable without auth; add when auth implemented |
-| S12 | LOW | CDN JS without SRI hashes | Acceptable for PoC; vendor locally for production |
-| S13 | LOW | Role-tag regex could be bypassed with Unicode whitespace | Covered by layered defense (spotlighting + grounding) |
-| S14 | LOW | Debug mode can log PII | Disabled by default; documented in README |
-| S15 | INFO | No dependency vulnerability scanning | No current CVEs; add `pip-audit` for production |
+| S10 | MEDIUM | No authentication on web app | **FIXED** — Caddy `basicauth` template added, ready to enable |
+| S11 | MEDIUM | No CSRF protection | Documented; add with auth |
+| S12 | LOW | CDN JS without SRI hashes | **FIXED** — SRI integrity hashes on htmx + sse.js |
+| S13 | LOW | Role-tag regex bypass | **FIXED** — Multiline regex + model-specific markers (<<SYS>>, [INST], etc.) |
+| S14 | LOW | Debug mode can log PII | Documented in README |
+| S15 | INFO | No dependency vulnerability scanning | **FIXED** — `pip-audit` added to dev deps + `make audit` |
 
 ### OWASP LLM Top 10 Coverage
 
@@ -67,12 +67,12 @@
 
 | # | Severity | Finding | Status |
 |---|----------|---------|--------|
-| Q3 | MEDIUM | Test coverage gaps: `create_hybrid_clients`, SSE, CLI integration | Core pipeline well-tested; gaps are in integration layer |
-| Q4 | MEDIUM | Prompt file path assumes source tree layout | Works in Docker due to COPY; would need `importlib.resources` for pip-installed package |
-| Q5 | MEDIUM | In-memory job store: no eviction, not multi-worker safe | Acceptable for PoC; noted for production |
-| Q6 | LOW | `datetime.now()` timezone-naive in some places | Non-critical; messages are local timestamps |
-| Q7 | LOW | Severity/status as `str` instead of `StrEnum` | Technical debt; doesn't affect correctness |
-| Q8 | LOW | Dead code: `seed.get_seed_timestamp()` | Minor; no impact |
+| Q3 | MEDIUM | Test coverage gaps: `create_hybrid_clients` | **FIXED** — 5 new hybrid tests added |
+| Q4 | MEDIUM | Prompt file path assumes source tree layout | **FIXED** — Prompts moved to `src/qbr/prompts/` (package-relative) |
+| Q5 | MEDIUM | In-memory job store: no eviction | **FIXED** — LRU eviction, max 20 jobs |
+| Q6 | LOW | `datetime.now()` timezone-naive | **FIXED** — `datetime.now(UTC)` everywhere |
+| Q7 | LOW | Severity/status as `str` instead of `StrEnum` | **FIXED** — `Severity` and `FlagStatus` StrEnum |
+| Q8 | LOW | Dead code: `seed.get_seed_timestamp()` | **FIXED** — Removed |
 
 ---
 
