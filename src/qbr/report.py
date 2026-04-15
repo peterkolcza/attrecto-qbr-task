@@ -26,33 +26,35 @@ def _flags_to_json(flags_by_project: dict[str, list[AttentionFlag]]) -> str:
     for project, flags in flags_by_project.items():
         data[project] = []
         for f in flags:
-            data[project].append({
-                "flag_type": f.flag_type.value,
-                "title": f.title,
-                "severity": f.severity,
-                "age_days": f.age_days,
-                "status": f.status,
-                "evidence_summary": f.evidence_summary,
-                "sources": [
-                    {
-                        "person": s.person,
-                        "email": s.email,
-                        "role": s.role,
-                        "timestamp": s.timestamp.isoformat(),
-                        "source_ref": s.source_ref,
-                        "quoted_text": s.quoted_text,
-                    }
-                    for s in f.sources
-                ],
-                "conflicts": [
-                    {
-                        "description": c.description,
-                        "source_a": {"person": c.source_a.person, "ref": c.source_a.source_ref},
-                        "source_b": {"person": c.source_b.person, "ref": c.source_b.source_ref},
-                    }
-                    for c in f.conflicts
-                ],
-            })
+            data[project].append(
+                {
+                    "flag_type": f.flag_type.value,
+                    "title": f.title,
+                    "severity": f.severity,
+                    "age_days": f.age_days,
+                    "status": f.status,
+                    "evidence_summary": f.evidence_summary,
+                    "sources": [
+                        {
+                            "person": s.person,
+                            "email": s.email,
+                            "role": s.role,
+                            "timestamp": s.timestamp.isoformat(),
+                            "source_ref": s.source_ref,
+                            "quoted_text": s.quoted_text,
+                        }
+                        for s in f.sources
+                    ],
+                    "conflicts": [
+                        {
+                            "description": c.description,
+                            "source_a": {"person": c.source_a.person, "ref": c.source_a.source_ref},
+                            "source_b": {"person": c.source_b.person, "ref": c.source_b.source_ref},
+                        }
+                        for c in f.conflicts
+                    ],
+                }
+            )
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 

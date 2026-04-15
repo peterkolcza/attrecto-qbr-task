@@ -37,6 +37,46 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 templates.env.cache_size = 0  # disable template caching to avoid unhashable key issues
 
+
+def _md_to_html(text: str) -> str:
+    """Convert markdown to HTML safely (no raw LLM output as HTML)."""
+    import bleach
+    import markdown as md_lib
+
+    raw_html = md_lib.markdown(text, extensions=["tables", "fenced_code"])
+    # Sanitize: only allow safe HTML tags (prevent XSS from LLM output)
+    return bleach.clean(
+        raw_html,
+        tags=[
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "p",
+            "ul",
+            "ol",
+            "li",
+            "strong",
+            "em",
+            "code",
+            "pre",
+            "blockquote",
+            "table",
+            "thead",
+            "tbody",
+            "tr",
+            "th",
+            "td",
+            "hr",
+            "br",
+            "a",
+        ],
+        attributes={"a": ["href"]},
+    )
+
+
+templates.env.filters["markdown"] = _md_to_html
+
 SAMPLE_DATA_DIR = Path(__file__).parent.parent.parent / "task" / "sample_data"
 
 # In-memory job store
@@ -75,20 +115,38 @@ async def start_analysis(request: Request, files: list[UploadFile] | None = None
     }
 
     # Determine input source
+    MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5 MB per file
+    MAX_FILES = 50
     if files and any(f.filename for f in files):
-        # Save uploaded files to a temp directory
         upload_dir = Path(f"/tmp/qbr_uploads/{job_id}")
         upload_dir.mkdir(parents=True, exist_ok=True)
+        file_count = 0
         for f in files:
-            if f.filename and f.filename.endswith(".txt"):
-                content = await f.read()
-                (upload_dir / f.filename).write_bytes(content)
+            if not f.filename:
+                continue
+            # Sanitize filename: strip directory components (prevent path traversal)
+            safe_name = Path(f.filename).name
+            if not safe_name.endswith(".txt"):
+                continue
+            content = await f.read(MAX_UPLOAD_SIZE + 1)
+            if len(content) > MAX_UPLOAD_SIZE:
+                continue  # skip oversized files
+            (upload_dir / safe_name).write_bytes(content)
+            file_count += 1
+            if file_count >= MAX_FILES:
+                break
         input_dir = upload_dir
     else:
         input_dir = SAMPLE_DATA_DIR
 
-    # Run analysis in background
-    asyncio.create_task(_run_analysis(job_id, input_dir))
+    # Rate limit: max 3 concurrent analyses
+    active = sum(1 for j in jobs.values() if j["state"] in ("queued", "processing"))
+    if active > 3:
+        return {"error": "Too many concurrent analyses. Please wait.", "status": "rejected"}
+
+    # Run analysis in background (store task ref to prevent GC warnings)
+    task = asyncio.create_task(_run_analysis(job_id, input_dir))
+    jobs[job_id]["_task"] = task
 
     return {"job_id": job_id, "status": "queued"}
 
@@ -120,6 +178,12 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
             f"Parsed {len(threads)} threads across {len({t.project for t in threads})} projects",
         )
 
+        # Load colleagues roster for role-based severity scoring
+        from qbr.parser import parse_colleagues
+
+        colleagues_path = input_dir / "Colleagues.txt"
+        colleagues = parse_colleagues(colleagues_path) if colleagues_path.exists() else []
+
         # Step 2: Extract per thread
         all_items: dict[str, list[ExtractedItem]] = defaultdict(list)
         for i, thread in enumerate(threads):
@@ -128,7 +192,7 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
             _log_progress(job, f"[{i + 1}/{len(threads)}] Processing: {thread.subject[:60]}...")
             try:
                 items = await asyncio.to_thread(
-                    run_pipeline_for_thread, thread, extraction_client, [], extraction_model
+                    run_pipeline_for_thread, thread, extraction_client, colleagues, extraction_model
                 )
                 project = thread.project or "Unknown"
                 all_items[project].extend(items)
@@ -165,9 +229,15 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
 
     except Exception as e:
         job["state"] = "error"
-        job["error"] = str(e)
-        _log_progress(job, f"Error: {e}")
-        logger.exception("Analysis failed for job %s", job_id)
+        job["error"] = "Analysis failed. Check server logs for details."
+        _log_progress(job, "Error: analysis failed")
+        logger.exception("Analysis failed for job %s: %s", job_id, e)
+    finally:
+        # Cleanup uploaded temp files
+        import shutil
+
+        if input_dir != SAMPLE_DATA_DIR and input_dir.exists():
+            shutil.rmtree(input_dir, ignore_errors=True)
 
 
 def _log_progress(job: dict[str, Any], message: str) -> None:
