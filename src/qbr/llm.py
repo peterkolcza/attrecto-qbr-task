@@ -301,3 +301,46 @@ def create_client(
     if provider == "ollama":
         return OllamaClient(host=ollama_host, default_model=ollama_model, tracker=tracker)
     raise ValueError(f"Unknown provider: {provider!r}. Use 'anthropic' or 'ollama'.")
+
+
+def create_hybrid_clients(
+    extraction_provider: str = "ollama",
+    synthesis_provider: str = "ollama",
+    api_key: str | None = None,
+    ollama_host: str = "http://localhost:11434",
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    tracker: UsageTracker | None = None,
+) -> tuple[LLMClient, str, LLMClient, str]:
+    """Create separate clients for extraction and synthesis stages.
+
+    Returns: (extraction_client, extraction_model, synthesis_client, synthesis_model)
+
+    If ANTHROPIC_API_KEY is set but providers are both "ollama",
+    auto-upgrades synthesis to Anthropic Sonnet for better quality.
+    """
+    tracker = tracker or UsageTracker()
+
+    # Auto-upgrade: if API key exists and no explicit synthesis provider override,
+    # use Anthropic for synthesis (higher quality)
+    if api_key and synthesis_provider == "ollama" and extraction_provider == "ollama":
+        synthesis_provider = "anthropic"
+
+    extraction_client = create_client(
+        provider=extraction_provider,
+        api_key=api_key,
+        ollama_host=ollama_host,
+        ollama_model=ollama_model,
+        tracker=tracker,
+    )
+    extraction_model = ollama_model if extraction_provider == "ollama" else HAIKU_MODEL
+
+    synthesis_client = create_client(
+        provider=synthesis_provider,
+        api_key=api_key,
+        ollama_host=ollama_host,
+        ollama_model=ollama_model,
+        tracker=tracker,
+    )
+    synthesis_model = ollama_model if synthesis_provider == "ollama" else SONNET_MODEL
+
+    return extraction_client, extraction_model, synthesis_client, synthesis_model
