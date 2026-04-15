@@ -1,4 +1,4 @@
-.PHONY: install lint test run run-debug smoke-test seed-demo web
+.PHONY: install lint test audit run run-debug smoke-test seed-demo web
 
 install:
 	uv sync --all-extras
@@ -13,6 +13,9 @@ format:
 
 test:
 	uv run pytest -v
+
+audit:
+	uv run pip-audit
 
 run:
 	uv run qbr run --input task/sample_data --output reports/
