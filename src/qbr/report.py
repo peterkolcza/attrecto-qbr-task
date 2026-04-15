@@ -17,7 +17,7 @@ from qbr.models import AttentionFlag  # noqa: TC001 — used at runtime for seri
 
 logger = logging.getLogger(__name__)
 
-PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
+PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
 def _flags_to_json(flags_by_project: dict[str, list[AttentionFlag]]) -> str:

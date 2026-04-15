@@ -79,8 +79,20 @@ templates.env.filters["markdown"] = _md_to_html
 
 SAMPLE_DATA_DIR = Path(__file__).parent.parent.parent / "task" / "sample_data"
 
-# In-memory job store
+# In-memory job store (evicts oldest when exceeding MAX_JOBS)
+MAX_JOBS = 20
 jobs: dict[str, dict[str, Any]] = {}
+
+
+def _evict_old_jobs() -> None:
+    """Remove oldest completed jobs if over MAX_JOBS limit."""
+    if len(jobs) <= MAX_JOBS:
+        return
+    completed = [(jid, j) for jid, j in jobs.items() if j["state"] in ("complete", "error")]
+    completed.sort(key=lambda x: x[1].get("created_at", ""))
+    while len(jobs) > MAX_JOBS and completed:
+        jid, _ = completed.pop(0)
+        del jobs[jid]
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -104,6 +116,7 @@ async def healthz():
 @app.post("/analyze")
 async def start_analysis(request: Request, files: list[UploadFile] | None = None):
     """Start an analysis job. Uses demo data if no files uploaded."""
+    _evict_old_jobs()
     job_id = str(uuid.uuid4())[:8]
     jobs[job_id] = {
         "id": job_id,
