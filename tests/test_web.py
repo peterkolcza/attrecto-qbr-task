@@ -27,7 +27,7 @@ class TestIndex:
         resp = client.get("/")
         assert resp.status_code == 200
         assert "QBR" in resp.text
-        assert "Run Demo" in resp.text
+        assert "Process Demo Emails" in resp.text
 
     def test_index_has_upload_form(self, client):
         resp = client.get("/")

@@ -1,6 +1,46 @@
 {% extends "base.html" %}
-{% block title %}QBR — Dashboard{% endblock %}
+{% block title %}QBR — Director Dashboard{% endblock %}
 {% block content %}
+
+<!-- Project Portfolio Overview -->
+<h2 class="text-lg font-semibold mb-4">Portfolio Overview</h2>
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+    {% for proj in projects %}
+    <div class="bg-white rounded-lg shadow p-4 border-l-4
+        {% if proj.health == 'critical' %}border-red-500
+        {% elif proj.health == 'warning' %}border-yellow-500
+        {% elif proj.health == 'good' %}border-green-500
+        {% else %}border-gray-300{% endif %}">
+        <div class="flex items-center justify-between mb-2">
+            <h3 class="font-semibold">{{ proj.name }}</h3>
+            <span class="text-xs px-2 py-1 rounded
+                {% if proj.health == 'unknown' %}bg-gray-100 text-gray-600{% endif %}">
+                {% if proj.health == 'unknown' %}Pending analysis{% else %}{{ proj.health }}{% endif %}
+            </span>
+        </div>
+        <div class="text-sm text-gray-600 space-y-1">
+            <p><strong>PM:</strong> {{ proj.pm.split('(')[0] }}</p>
+            <p><strong>Team:</strong> {{ proj.team_size }} members</p>
+            <p><strong>QBR:</strong> {{ proj.qbr_date }}</p>
+            <p><strong>Focus:</strong> {{ proj.q3_focus[:80] }}{% if proj.q3_focus|length > 80 %}...{% endif %}</p>
+        </div>
+        {% if proj.known_risks %}
+        <div class="mt-2 text-xs text-orange-700 bg-orange-50 p-2 rounded">
+            <strong>Known risks:</strong> {{ proj.known_risks }}
+        </div>
+        {% endif %}
+        <details class="mt-2">
+            <summary class="text-xs text-gray-400 cursor-pointer">Team ({{ proj.team|length }})</summary>
+            <ul class="text-xs text-gray-500 mt-1 space-y-0.5">
+                {% for member in proj.team %}
+                <li>{{ member.name }} — {{ member.role }}</li>
+                {% endfor %}
+            </ul>
+        </details>
+    </div>
+    {% endfor %}
+</div>
+
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
     <!-- Run Analysis Card -->
     <div class="bg-white rounded-lg shadow p-6">
@@ -10,9 +50,9 @@
         <form action="/analyze" method="post" class="mb-4">
             <button type="submit"
                     class="w-full bg-cyan-600 text-white py-3 px-4 rounded-lg hover:bg-cyan-700 transition font-medium">
-                Run Demo (18 sample emails)
+                Process Demo Emails (18 threads, 3 projects)
             </button>
-            <p class="text-sm text-gray-500 mt-2">Analyzes the bundled sample emails from 3 projects: Phoenix, Omicron, DivatKirály</p>
+            <p class="text-sm text-gray-500 mt-2">Watch the system process each email thread in real-time and see the dashboard update with Attention Flags</p>
         </form>
         <hr class="my-4">
         {% endif %}
@@ -31,7 +71,7 @@
 
     <!-- Recent Jobs Card -->
     <div class="bg-white rounded-lg shadow p-6">
-        <h2 class="text-lg font-semibold mb-4">Recent Jobs</h2>
+        <h2 class="text-lg font-semibold mb-4">Analysis History</h2>
         {% if jobs %}
         <div class="space-y-3">
             {% for job_id, job in jobs %}
@@ -51,7 +91,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="text-gray-500 text-sm">No jobs yet. Run an analysis to get started.</p>
+        <p class="text-gray-500 text-sm">No analysis runs yet. Click "Process Demo Emails" to see the system in action.</p>
         {% endif %}
     </div>
 </div>
@@ -62,23 +102,23 @@
     <div class="grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
         <div class="text-center p-3">
             <div class="text-2xl mb-1">📧</div>
-            <div class="font-medium">Parse</div>
-            <div class="text-gray-500">Email threads parsed, grouped by project</div>
+            <div class="font-medium">1. Parse</div>
+            <div class="text-gray-500">Email threads parsed and grouped by project</div>
         </div>
         <div class="text-center p-3">
             <div class="text-2xl mb-1">🔍</div>
-            <div class="font-medium">Extract</div>
-            <div class="text-gray-500">AI finds commitments, questions, risks, blockers</div>
+            <div class="font-medium">2. Extract</div>
+            <div class="text-gray-500">AI finds commitments, questions, risks, blockers with source quotes</div>
         </div>
         <div class="text-center p-3">
             <div class="text-2xl mb-1">🚩</div>
-            <div class="font-medium">Classify</div>
-            <div class="text-gray-500">Attention Flags with severity & provenance</div>
+            <div class="font-medium">3. Classify</div>
+            <div class="text-gray-500">Attention Flags scored by severity, age, and provenance</div>
         </div>
         <div class="text-center p-3">
             <div class="text-2xl mb-1">📊</div>
-            <div class="font-medium">Report</div>
-            <div class="text-gray-500">Portfolio Health Report for QBR</div>
+            <div class="font-medium">4. Report</div>
+            <div class="text-gray-500">Portfolio Health Report with recommended Director actions</div>
         </div>
     </div>
 </div>
