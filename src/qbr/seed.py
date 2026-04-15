@@ -6,8 +6,6 @@ before running email analysis.
 
 from __future__ import annotations
 
-from datetime import datetime
-
 
 def get_demo_projects() -> list[dict]:
     """Return pre-seeded project data for the dashboard demo."""
@@ -69,7 +67,3 @@ def get_demo_projects() -> list[dict]:
             ],
         },
     ]
-
-
-def get_seed_timestamp() -> str:
-    return datetime.now().isoformat()

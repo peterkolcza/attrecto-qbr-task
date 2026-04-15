@@ -15,9 +15,11 @@ from qbr.models import (
     AttentionFlag,
     Conflict,
     ExtractedItem,
+    FlagStatus,
     FlagType,
     ItemType,
     ResolutionStatus,
+    Severity,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,7 +46,7 @@ def classify_flags(
         # Flag 1: Unresolved High-Priority Action Items
         if item.status in (ResolutionStatus.OPEN, ResolutionStatus.AMBIGUOUS):
             is_old = item.age_days >= UNRESOLVED_AGE_THRESHOLD_DAYS
-            is_severe = item.severity in ("high", "critical")
+            is_severe = item.severity in (Severity.HIGH, Severity.CRITICAL)
             if is_old or is_severe:
                 flags.append(
                     AttentionFlag(
@@ -56,7 +58,9 @@ def classify_flags(
                         age_days=item.age_days,
                         evidence_summary=f'"{item.quoted_text}" — {item.source.person} '
                         f"({item.source.source_ref})",
-                        status="open" if item.status == ResolutionStatus.OPEN else "needs_review",
+                        status=FlagStatus.OPEN
+                        if item.status == ResolutionStatus.OPEN
+                        else FlagStatus.NEEDS_REVIEW,
                     )
                 )
 
@@ -75,7 +79,7 @@ def classify_flags(
                     age_days=item.age_days,
                     evidence_summary=f'"{item.quoted_text}" — {item.source.person} '
                     f"({item.source.source_ref})",
-                    status="open",
+                    status=FlagStatus.OPEN,
                 )
             )
 
@@ -125,7 +129,7 @@ def prioritize_flags(
 
     Priority order: severity (critical > high > medium > low), then age (older first).
     """
-    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    severity_order = {Severity.CRITICAL: 0, Severity.HIGH: 1, Severity.MEDIUM: 2, Severity.LOW: 3}
 
     sorted_flags = sorted(
         flags,
