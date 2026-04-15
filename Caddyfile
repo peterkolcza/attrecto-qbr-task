@@ -5,6 +5,12 @@
     # Automatic HTTPS via Let's Encrypt (production)
     # For localhost, Caddy uses self-signed certs
 
+    # PRODUCTION: Uncomment to enable Basic Auth (protects against unauthorized LLM cost)
+    # Generate hash: caddy hash-password --plaintext 'your-password'
+    # basicauth * {
+    #     director $2a$14$HASH_HERE
+    # }
+
     encode gzip
 
     header {

@@ -36,7 +36,7 @@ from qbr.security import (
 
 logger = logging.getLogger(__name__)
 
-PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
+PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
 # --- Pydantic schemas for LLM structured output ---
