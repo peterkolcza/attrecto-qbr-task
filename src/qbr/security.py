@@ -30,6 +30,8 @@ def sanitize_email_body(body: str) -> str:
     """
     # Strip XML/HTML tags to prevent delimiter escapes
     cleaned = _XML_TAGS.sub("", body)
+    # Neutralize our own delimiter tag name to prevent escape attacks
+    cleaned = cleaned.replace("untrusted_email_content", "untrusted_email_c\u200bontent")
     # Neutralize role-tag patterns by adding a zero-width space
     cleaned = _ROLE_PATTERNS.sub(lambda m: m.group(0)[0] + "\u200b" + m.group(0)[1:], cleaned)
     return cleaned
@@ -37,11 +39,7 @@ def sanitize_email_body(body: str) -> str:
 
 def wrap_untrusted_content(content: str, index: int = 0) -> str:
     """Wrap content in spotlighting delimiters for safe LLM processing."""
-    return (
-        f"<untrusted_email_content index=\"{index}\">\n"
-        f"{content}\n"
-        f"</untrusted_email_content>"
-    )
+    return f'<untrusted_email_content index="{index}">\n{content}\n</untrusted_email_content>'
 
 
 SPOTLIGHTING_PREAMBLE = (

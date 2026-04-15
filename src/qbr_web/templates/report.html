@@ -12,7 +12,7 @@
     <!-- Main Report -->
     <div class="lg:col-span-2 bg-white rounded-lg shadow p-6">
         <div class="prose max-w-none">
-            {{ report_md | replace("# ", "<h1>") | replace("## ", "<h2>") | replace("### ", "<h3>") | safe }}
+            {{ report_md | markdown | safe }}
         </div>
     </div>
 

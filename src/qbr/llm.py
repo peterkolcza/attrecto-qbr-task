@@ -187,14 +187,18 @@ class AnthropicClient(LLMClient):
             ]
             kwargs["tool_choice"] = {"type": "tool", "name": "structured_output"}
 
-        # Retry with exponential backoff
+        # Retry with exponential backoff (only transient errors)
         for attempt in range(3):
             try:
                 start = time.monotonic()
                 response = self._client.messages.create(**kwargs)
                 duration = int((time.monotonic() - start) * 1000)
                 break
-            except Exception:
+            except (
+                anthropic.APIConnectionError,
+                anthropic.RateLimitError,
+                anthropic.InternalServerError,
+            ):
                 if attempt == 2:
                     raise
                 wait = 2**attempt
