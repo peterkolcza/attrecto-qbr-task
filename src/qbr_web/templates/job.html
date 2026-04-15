@@ -3,10 +3,10 @@
 {% block content %}
 <div class="mb-4 flex items-center justify-between">
     <h1 class="text-xl font-bold">Job {{ job.id }}</h1>
-    <span class="text-sm px-3 py-1 rounded
+    <span id="status-badge" class="text-sm px-3 py-1 rounded
         {% if job.state == 'complete' %}bg-green-100 text-green-800
         {% elif job.state == 'error' %}bg-red-100 text-red-800
-        {% elif job.state == 'processing' %}bg-yellow-100 text-yellow-800
+        {% elif job.state == 'processing' or job.state == 'queued' %}bg-yellow-100 text-yellow-800
         {% else %}bg-gray-100 text-gray-800{% endif %}">
         {{ job.state }}
     </span>
@@ -16,12 +16,7 @@
     <!-- Processing Log -->
     <div class="bg-white rounded-lg shadow p-4">
         <h2 class="text-lg font-semibold mb-3">Processing Log</h2>
-        <div id="log-container" class="bg-gray-900 text-green-400 rounded p-3 font-mono text-xs max-h-96 overflow-y-auto"
-             {% if job.state == 'processing' %}
-             hx-ext="sse"
-             sse-connect="/api/jobs/{{ job.id }}/stream"
-             {% endif %}>
-
+        <div id="log-container" class="bg-gray-900 text-green-400 rounded p-3 font-mono text-xs max-h-[500px] overflow-y-auto">
             <!-- Existing progress messages -->
             {% for p in job.progress %}
             <div class="mb-1">
@@ -29,22 +24,17 @@
                 <span>{{ p.message }}</span>
             </div>
             {% endfor %}
-
-            {% if job.state == 'processing' %}
-            <!-- SSE progress updates -->
-            <div sse-swap="progress" hx-swap="beforeend" hx-target="#log-container"></div>
-            {% endif %}
         </div>
 
-        {% if job.state == 'processing' %}
-        <p class="text-sm text-gray-500 mt-2 animate-pulse">Processing... updates stream in real-time</p>
+        {% if job.state in ('processing', 'queued') %}
+        <p id="processing-indicator" class="text-sm text-gray-500 mt-2 animate-pulse">Processing... updates stream in real-time</p>
         {% endif %}
     </div>
 
     <!-- Result / Actions -->
-    <div class="bg-white rounded-lg shadow p-4">
+    <div id="result-panel" class="bg-white rounded-lg shadow p-4">
         {% if job.state == 'complete' %}
-        <h2 class="text-lg font-semibold mb-3">Result</h2>
+        <h2 class="text-lg font-semibold mb-3 text-green-700">Analysis Complete</h2>
         <div class="space-y-3">
             <a href="/jobs/{{ job.id }}/report"
                class="block w-full bg-cyan-600 text-white text-center py-3 rounded-lg hover:bg-cyan-700 transition font-medium">
@@ -63,8 +53,17 @@
         <h2 class="text-lg font-semibold mb-3 text-red-600">Error</h2>
         <p class="text-sm text-red-600 bg-red-50 p-3 rounded">{{ job.error }}</p>
         {% else %}
-        <h2 class="text-lg font-semibold mb-3">Waiting...</h2>
-        <p class="text-sm text-gray-500">The analysis is running. Results will appear here when complete.</p>
+        <h2 class="text-lg font-semibold mb-3">Processing...</h2>
+        <p class="text-sm text-gray-500">The analysis pipeline is running. Watch the Processing Log for real-time updates.</p>
+        <div class="mt-4 text-sm text-gray-400">
+            <p class="font-medium mb-2">Pipeline steps:</p>
+            <ol class="list-decimal pl-5 space-y-1">
+                <li>Parse email threads & group by project</li>
+                <li>Extract items per thread (commitments, questions, risks, blockers)</li>
+                <li>Classify Attention Flags & score severity</li>
+                <li>Generate Portfolio Health Report</li>
+            </ol>
+        </div>
         {% endif %}
     </div>
 </div>
@@ -72,4 +71,65 @@
 <div class="mt-4">
     <a href="/" class="text-cyan-600 hover:text-cyan-800 text-sm">← Back to Dashboard</a>
 </div>
+
+{% if job.state in ('processing', 'queued') %}
+<script>
+// Auto-refresh: poll the job page every 5 seconds until done
+(function() {
+    const logContainer = document.getElementById('log-container');
+    const resultPanel = document.getElementById('result-panel');
+    const badge = document.getElementById('status-badge');
+    const indicator = document.getElementById('processing-indicator');
+
+    async function pollProgress() {
+        try {
+            const resp = await fetch('/api/jobs/{{ job.id }}/progress');
+            const data = await resp.json();
+
+            // Update log
+            logContainer.innerHTML = data.progress.map(p =>
+                `<div class="mb-1"><span class="text-gray-500">${p.timestamp.substring(11,19)}</span> <span>${p.message}</span></div>`
+            ).join('');
+            logContainer.scrollTop = logContainer.scrollHeight;
+
+            // Check if done
+            if (data.state === 'complete') {
+                badge.className = 'text-sm px-3 py-1 rounded bg-green-100 text-green-800';
+                badge.textContent = 'complete';
+                if (indicator) indicator.remove();
+                resultPanel.innerHTML = `
+                    <h2 class="text-lg font-semibold mb-3 text-green-700">Analysis Complete</h2>
+                    <div class="space-y-3">
+                        <a href="/jobs/{{ job.id }}/report"
+                           class="block w-full bg-cyan-600 text-white text-center py-3 rounded-lg hover:bg-cyan-700 transition font-medium">
+                            View Full Report
+                        </a>
+                        <div class="text-sm text-gray-600 space-y-1">
+                            <p>LLM calls: ${data.usage.total_calls}</p>
+                            <p>Input tokens: ${data.usage.total_input_tokens.toLocaleString()}</p>
+                            <p>Output tokens: ${data.usage.total_output_tokens.toLocaleString()}</p>
+                            <p>Estimated cost: $${data.usage.total_cost_usd.toFixed(4)}</p>
+                        </div>
+                    </div>`;
+                return; // stop polling
+            } else if (data.state === 'error') {
+                badge.className = 'text-sm px-3 py-1 rounded bg-red-100 text-red-800';
+                badge.textContent = 'error';
+                if (indicator) indicator.remove();
+                resultPanel.innerHTML = `
+                    <h2 class="text-lg font-semibold mb-3 text-red-600">Error</h2>
+                    <p class="text-sm text-red-600 bg-red-50 p-3 rounded">${data.error || 'Analysis failed'}</p>`;
+                return;
+            }
+        } catch (e) {
+            console.error('Poll error:', e);
+        }
+        setTimeout(pollProgress, 3000);
+    }
+
+    // Start polling after a short delay
+    setTimeout(pollProgress, 2000);
+})();
+</script>
+{% endif %}
 {% endblock %}

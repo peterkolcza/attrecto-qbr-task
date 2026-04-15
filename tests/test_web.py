@@ -35,22 +35,22 @@ class TestIndex:
 
 
 class TestAnalyze:
-    def test_start_demo_analysis(self, client):
-        resp = client.post("/analyze")
+    def test_start_demo_analysis_redirects(self, client):
+        resp = client.post("/analyze", follow_redirects=False)
+        assert resp.status_code == 303
+        assert "/jobs/" in resp.headers["location"]
+
+    def test_start_demo_analysis_follow(self, client):
+        resp = client.post("/analyze")  # follows redirect by default
         assert resp.status_code == 200
-        data = resp.json()
-        assert "job_id" in data
-        assert data["status"] == "queued"
+        assert "Job" in resp.text
+        assert "Processing" in resp.text
 
     def test_job_detail_page(self, client):
-        # Start a job first
+        # Start a job first (follow redirect to get job page)
         resp = client.post("/analyze")
-        job_id = resp.json()["job_id"]
-
-        # Check job detail page
-        resp = client.get(f"/jobs/{job_id}")
         assert resp.status_code == 200
-        assert job_id in resp.text
+        assert "Processing Log" in resp.text
 
     def test_job_not_found(self, client):
         resp = client.get("/jobs/nonexistent")

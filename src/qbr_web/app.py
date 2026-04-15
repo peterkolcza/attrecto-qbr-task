@@ -14,7 +14,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
@@ -155,13 +155,18 @@ async def start_analysis(request: Request, files: list[UploadFile] | None = None
     # Rate limit: max 3 concurrent analyses
     active = sum(1 for j in jobs.values() if j["state"] in ("queued", "processing"))
     if active > 3:
-        return {"error": "Too many concurrent analyses. Please wait.", "status": "rejected"}
+        return HTMLResponse(
+            "<h1>Too many concurrent analyses</h1><p>Please wait and try again.</p>"
+            '<p><a href="/">Back to Dashboard</a></p>',
+            status_code=429,
+        )
 
     # Run analysis in background (store task ref to prevent GC warnings)
     task = asyncio.create_task(_run_analysis(job_id, input_dir))
     jobs[job_id]["_task"] = task
 
-    return {"job_id": job_id, "status": "queued"}
+    # Redirect browser to job progress page
+    return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
 
 
 async def _run_analysis(job_id: str, input_dir: Path) -> None:
@@ -261,6 +266,21 @@ def _log_progress(job: dict[str, Any], message: str) -> None:
             "message": message,
         }
     )
+
+
+@app.get("/api/jobs/{job_id}/progress")
+async def job_progress(job_id: str):
+    """JSON endpoint for polling job progress (used by the frontend JS)."""
+    job = jobs.get(job_id)
+    if not job:
+        return {"error": "Job not found", "state": "unknown", "progress": []}
+    result: dict[str, Any] = {
+        "state": job["state"],
+        "progress": job["progress"],
+        "error": job.get("error"),
+        "usage": job["result"]["usage"] if job.get("result") else None,
+    }
+    return result
 
 
 @app.get("/api/jobs/{job_id}/stream")
