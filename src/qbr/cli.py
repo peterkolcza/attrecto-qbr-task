@@ -19,7 +19,7 @@ from qbr import __version__
 from qbr.flags import aggregate_flags_by_project
 from qbr.llm import HAIKU_MODEL, SONNET_MODEL, UsageTracker, create_client
 from qbr.models import ExtractedItem  # noqa: TC001 — used as type annotation at runtime
-from qbr.parser import parse_all_emails
+from qbr.parser import parse_all_emails, parse_colleagues
 from qbr.pipeline import run_pipeline_for_thread
 from qbr.report import build_report_json, generate_report, save_report
 
@@ -100,10 +100,23 @@ def run(
         tracker=tracker,
     )
 
+    # Resolve model names based on provider
+    ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+    if provider == "ollama":
+        extraction_model = ollama_model
+        synthesis_model = ollama_model
+    else:
+        extraction_model = HAIKU_MODEL
+        synthesis_model = SONNET_MODEL
+
     input_path = Path(input)
     if not input_path.exists():
         console.print(f"[red]Error: input directory not found: {input_path}[/red]")
         raise typer.Exit(code=1)
+
+    # Load colleagues roster
+    colleagues_path = input_path / "Colleagues.txt"
+    colleagues = parse_colleagues(colleagues_path) if colleagues_path.exists() else []
 
     # Step 1: Parse emails
     with Progress(
@@ -124,7 +137,7 @@ def run(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console
     ) as progress:
         task = progress.add_task(
-            f"[2/4] Extracting items ({HAIKU_MODEL.split('-')[1].title()})...", total=len(threads)
+            f"[2/4] Extracting items ({extraction_model})...", total=len(threads)
         )
         for thread in threads:
             if not thread.messages:
@@ -134,10 +147,8 @@ def run(
                 items = run_pipeline_for_thread(
                     thread,
                     client,
-                    colleagues=parse_all_emails.__wrapped__
-                    if hasattr(parse_all_emails, "__wrapped__")
-                    else [],  # type: ignore[arg-type]
-                    extraction_model=HAIKU_MODEL,
+                    colleagues=colleagues,
+                    extraction_model=extraction_model,
                 )
                 project = thread.project or "Unknown"
                 all_items[project].extend(items)
@@ -186,10 +197,8 @@ def run(
     with Progress(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console
     ) as progress:
-        task = progress.add_task(
-            f"[4/4] Generating report ({SONNET_MODEL.split('-')[1].title()})...", total=None
-        )
-        report_md = generate_report(flags_by_project, client)
+        task = progress.add_task(f"[4/4] Generating report ({synthesis_model})...", total=None)
+        report_md = generate_report(flags_by_project, client, model=synthesis_model)
         report_json = build_report_json(flags_by_project, report_md)
         md_path, json_path = save_report(report_md, report_json, output)
         progress.update(task, completed=True)
