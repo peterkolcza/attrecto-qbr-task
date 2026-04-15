@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id }} — QBR{% endblock %}
+{% block content %}
+<div class="mb-4 flex items-center justify-between">
+    <h1 class="text-xl font-bold">Job {{ job.id }}</h1>
+    <span class="text-sm px-3 py-1 rounded
+        {% if job.state == 'complete' %}bg-green-100 text-green-800
+        {% elif job.state == 'error' %}bg-red-100 text-red-800
+        {% elif job.state == 'processing' %}bg-yellow-100 text-yellow-800
+        {% else %}bg-gray-100 text-gray-800{% endif %}">
+        {{ job.state }}
+    </span>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Processing Log -->
+    <div class="bg-white rounded-lg shadow p-4">
+        <h2 class="text-lg font-semibold mb-3">Processing Log</h2>
+        <div id="log-container" class="bg-gray-900 text-green-400 rounded p-3 font-mono text-xs max-h-96 overflow-y-auto"
+             {% if job.state == 'processing' %}
+             hx-ext="sse"
+             sse-connect="/api/jobs/{{ job.id }}/stream"
+             {% endif %}>
+
+            <!-- Existing progress messages -->
+            {% for p in job.progress %}
+            <div class="mb-1">
+                <span class="text-gray-500">{{ p.timestamp[11:19] }}</span>
+                <span>{{ p.message }}</span>
+            </div>
+            {% endfor %}
+
+            {% if job.state == 'processing' %}
+            <!-- SSE progress updates -->
+            <div sse-swap="progress" hx-swap="beforeend" hx-target="#log-container"></div>
+            {% endif %}
+        </div>
+
+        {% if job.state == 'processing' %}
+        <p class="text-sm text-gray-500 mt-2 animate-pulse">Processing... updates stream in real-time</p>
+        {% endif %}
+    </div>
+
+    <!-- Result / Actions -->
+    <div class="bg-white rounded-lg shadow p-4">
+        {% if job.state == 'complete' %}
+        <h2 class="text-lg font-semibold mb-3">Result</h2>
+        <div class="space-y-3">
+            <a href="/jobs/{{ job.id }}/report"
+               class="block w-full bg-cyan-600 text-white text-center py-3 rounded-lg hover:bg-cyan-700 transition font-medium">
+                View Full Report
+            </a>
+            {% if job.result and job.result.usage %}
+            <div class="text-sm text-gray-600 space-y-1">
+                <p>LLM calls: {{ job.result.usage.total_calls }}</p>
+                <p>Input tokens: {{ "{:,}".format(job.result.usage.total_input_tokens) }}</p>
+                <p>Output tokens: {{ "{:,}".format(job.result.usage.total_output_tokens) }}</p>
+                <p>Estimated cost: ${{ "%.4f"|format(job.result.usage.total_cost_usd) }}</p>
+            </div>
+            {% endif %}
+        </div>
+        {% elif job.state == 'error' %}
+        <h2 class="text-lg font-semibold mb-3 text-red-600">Error</h2>
+        <p class="text-sm text-red-600 bg-red-50 p-3 rounded">{{ job.error }}</p>
+        {% else %}
+        <h2 class="text-lg font-semibold mb-3">Waiting...</h2>
+        <p class="text-sm text-gray-500">The analysis is running. Results will appear here when complete.</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="mt-4">
+    <a href="/" class="text-cyan-600 hover:text-cyan-800 text-sm">← Back to Dashboard</a>
+</div>
+{% endblock %}

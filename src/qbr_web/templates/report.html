@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Report — Job {{ job.id }}{% endblock %}
+{% block content %}
+<div class="mb-4 flex items-center justify-between">
+    <h1 class="text-xl font-bold">Portfolio Health Report</h1>
+    <div class="space-x-2">
+        <a href="/jobs/{{ job.id }}" class="text-cyan-600 hover:text-cyan-800 text-sm">← Back to Job</a>
+    </div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- Main Report -->
+    <div class="lg:col-span-2 bg-white rounded-lg shadow p-6">
+        <div class="prose max-w-none">
+            {{ report_md | replace("# ", "<h1>") | replace("## ", "<h2>") | replace("### ", "<h3>") | safe }}
+        </div>
+    </div>
+
+    <!-- Sidebar: Stats & Flags -->
+    <div class="space-y-4">
+        <!-- Stats Card -->
+        <div class="bg-white rounded-lg shadow p-4">
+            <h3 class="font-semibold mb-3">Summary</h3>
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between">
+                    <span class="text-gray-500">Projects analyzed</span>
+                    <span class="font-medium">{{ report_json.projects_analyzed }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-500">Total flags</span>
+                    <span class="font-medium">{{ report_json.total_flags }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-500">Critical flags</span>
+                    <span class="font-medium text-red-600">{{ report_json.critical_flags }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-500">Generated</span>
+                    <span class="font-medium">{{ report_json.generated_at[:19] }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Flags by Project -->
+        {% for project, flags in report_json.flags_by_project.items() %}
+        <div class="bg-white rounded-lg shadow p-4">
+            <h3 class="font-semibold mb-2">{{ project }}</h3>
+            <div class="space-y-2">
+                {% for flag in flags %}
+                <details class="text-sm">
+                    <summary class="cursor-pointer hover:text-cyan-600">
+                        <span class="inline-block w-2 h-2 rounded-full mr-1
+                            {% if flag.severity == 'critical' %}bg-red-500
+                            {% elif flag.severity == 'high' %}bg-orange-500
+                            {% elif flag.severity == 'medium' %}bg-yellow-500
+                            {% else %}bg-green-500{% endif %}"></span>
+                        {{ flag.title[:60] }}
+                    </summary>
+                    <div class="mt-1 pl-4 text-gray-600 text-xs">
+                        <p><strong>Type:</strong> {{ flag.flag_type }}</p>
+                        <p><strong>Severity:</strong> {{ flag.severity }}</p>
+                        <p><strong>Age:</strong> {{ flag.age_days }} days</p>
+                        {% if flag.sources %}
+                        <p><strong>Source:</strong> {{ flag.sources[0].person }} ({{ flag.sources[0].source_ref }})</p>
+                        {% endif %}
+                        {% if flag.evidence_summary %}
+                        <blockquote class="mt-1 border-l-2 border-gray-300 pl-2 italic">{{ flag.evidence_summary[:200] }}</blockquote>
+                        {% endif %}
+                    </div>
+                </details>
+                {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

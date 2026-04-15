@@ -1,1 +1,1 @@
-"""QBR Web UI — placeholder for issue #11."""
+"""QBR Web UI — FastAPI + HTMX + Tailwind."""
