@@ -28,3 +28,8 @@ uv.lock
 # SQLite (web app state)
 *.db
 *.sqlite3
+node_modules/
+package.json
+package-lock.json
+scripts/debug_web.js
+scripts/screenshot_final.js
