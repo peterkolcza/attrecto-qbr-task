@@ -55,16 +55,12 @@ class TestParseFromLine:
         assert email == "varga.zsuzsa@kisjozsitech.hu"
 
     def test_angle_bracket_format(self):
-        name, email = _parse_from_line(
-            "From: István Nagy <nagy.istván@kisjozsitech.hu>"
-        )
+        name, email = _parse_from_line("From: István Nagy <nagy.istván@kisjozsitech.hu>")
         assert name == "István Nagy"
         assert email == "nagy.istván@kisjozsitech.hu"
 
     def test_parentheses_format(self):
-        name, email = _parse_from_line(
-            "From: Gábor Nagy (gabor.nagy@kisjozsitech.hu)"
-        )
+        name, email = _parse_from_line("From: Gábor Nagy (gabor.nagy@kisjozsitech.hu)")
         assert name == "Gábor Nagy"
         assert email == "gabor.nagy@kisjozsitech.hu"
 
@@ -153,9 +149,9 @@ class TestParseEmailFiles:
     def test_message_count(self, filename: str, expected_min_messages: int):
         path = SAMPLE_DIR / filename
         messages = parse_email_file(path)
-        assert (
-            len(messages) >= expected_min_messages
-        ), f"{filename}: expected ≥{expected_min_messages} messages, got {len(messages)}"
+        assert len(messages) >= expected_min_messages, (
+            f"{filename}: expected ≥{expected_min_messages} messages, got {len(messages)}"
+        )
 
     def test_all_messages_have_dates(self):
         """Every parsed message must have a valid date."""
@@ -194,9 +190,7 @@ class TestParseEmailFiles:
             thread = parse_thread(path)
             if len(thread.messages) > 1:
                 dates = [m.date for m in thread.messages]
-                assert dates == sorted(dates), (
-                    f"email{i}.txt messages not chronologically sorted"
-                )
+                assert dates == sorted(dates), f"email{i}.txt messages not chronologically sorted"
 
 
 # --- Thread and project attribution tests ---

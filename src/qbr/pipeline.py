@@ -21,6 +21,7 @@ from qbr.models import (
     ExtractedItem,
     ItemType,
     ResolutionStatus,
+    Severity,
     SourceAttribution,
     SourceType,
     Thread,
@@ -282,36 +283,27 @@ def _compute_severity(
     status: ResolutionStatus,
     role: str,
     age_days: int,
-) -> str:
-    """Heuristic severity scoring.
-
-    Factors:
-    - Blocker → critical
-    - Risk + open → high
-    - PM/BA raised + open → high
-    - Age > 14 days + open → high
-    - Age > 7 days + open → medium
-    - Otherwise → low
-    """
+) -> Severity:
+    """Heuristic severity scoring."""
     if status == ResolutionStatus.RESOLVED:
-        return "low"
+        return Severity.LOW
 
     if item_type == ItemType.BLOCKER:
-        return "critical"
+        return Severity.CRITICAL
 
     if item_type == ItemType.RISK:
-        return "high"
+        return Severity.HIGH
 
     if role in ("PM", "BA", "AM") and status != ResolutionStatus.RESOLVED:
-        return "high"
+        return Severity.HIGH
 
     if age_days > 14:
-        return "high"
+        return Severity.HIGH
 
     if age_days > 7:
-        return "medium"
+        return Severity.MEDIUM
 
-    return "low"
+    return Severity.LOW
 
 
 def run_pipeline_for_thread(

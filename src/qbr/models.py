@@ -55,6 +55,22 @@ class SourceAttribution(BaseModel):
     quoted_text: str = ""
 
 
+# --- Shared enums ---
+
+
+class Severity(StrEnum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class FlagStatus(StrEnum):
+    OPEN = "open"
+    NEEDS_REVIEW = "needs_review"
+    RESOLVED = "resolved"
+
+
 # --- Extraction pipeline models ---
 
 
@@ -83,7 +99,7 @@ class ExtractedItem(BaseModel):
     resolution_rationale: str = ""
     resolving_message_index: int | None = None
     age_days: int = 0
-    severity: str = "medium"  # "critical" | "high" | "medium" | "low"
+    severity: Severity = Severity.MEDIUM
 
 
 # --- Attention flags ---
@@ -107,11 +123,11 @@ class AttentionFlag(BaseModel):
 
     flag_type: FlagType
     title: str
-    severity: str = "medium"
+    severity: Severity = Severity.MEDIUM
     project: str = ""
     sources: list[SourceAttribution] = Field(default_factory=list)
     conflicts: list[Conflict] = Field(default_factory=list)
-    status: str = "open"  # "open" | "needs_review" | "resolved"
+    status: FlagStatus = FlagStatus.OPEN
     age_days: int = 0
     evidence_summary: str = ""
 

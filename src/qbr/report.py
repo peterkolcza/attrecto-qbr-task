@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime  # noqa: TC003 — used at runtime
+from datetime import UTC, datetime  # noqa: TC003 — used at runtime
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +102,7 @@ def build_report_json(
     )
 
     return {
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "projects_analyzed": len(flags_by_project),
         "total_flags": total_flags,
         "critical_flags": critical_count,
@@ -123,7 +123,7 @@ def save_report(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
     md_path = output_dir / f"portfolio_{timestamp}.md"
     md_path.write_text(report_markdown, encoding="utf-8")

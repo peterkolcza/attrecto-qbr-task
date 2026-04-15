@@ -8,7 +8,7 @@ import logging
 import os
 import uuid
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -98,7 +98,7 @@ async def index(request: Request):
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "timestamp": datetime.now(UTC).isoformat()}
 
 
 @app.post("/analyze")
@@ -111,7 +111,7 @@ async def start_analysis(request: Request, files: list[UploadFile] | None = None
         "progress": [],
         "result": None,
         "error": None,
-        "created_at": datetime.now().isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
     # Determine input source
@@ -244,7 +244,7 @@ def _log_progress(job: dict[str, Any], message: str) -> None:
     """Add a progress message to a job."""
     job["progress"].append(
         {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "message": message,
         }
     )
