@@ -207,15 +207,61 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
         for i, thread in enumerate(threads):
             if not thread.messages:
                 continue
-            _log_progress(job, f"[{i + 1}/{len(threads)}] Processing: {thread.subject[:60]}...")
+
+            # Detailed per-email header
+            first_msg = thread.messages[0]
+            off_topic_count = sum(1 for m in thread.messages if m.is_off_topic)
+            _log_progress(
+                job, f'[{i + 1}/{len(threads)}] {thread.source_file} — "{thread.subject[:80]}"'
+            )
+            _log_progress(
+                job,
+                f"  From: {first_msg.sender_name} <{first_msg.sender_email}> | "
+                f"Date: {first_msg.date.strftime('%Y-%m-%d %H:%M')}",
+            )
+            _log_progress(
+                job,
+                f"  Project: {thread.project or 'Unknown'} "
+                f"({len(thread.messages)} msgs, {off_topic_count} off-topic)",
+            )
+            _log_progress(job, f"  Extracting with {extraction_model}...")
+
             try:
-                items = await asyncio.to_thread(
+                items, metrics = await asyncio.to_thread(
                     run_pipeline_for_thread, thread, extraction_client, colleagues, extraction_model
                 )
                 project = thread.project or "Unknown"
                 all_items[project].extend(items)
-                open_count = sum(1 for it in items if it.status.value != "resolved")
-                _log_progress(job, f"  → {len(items)} items ({open_count} open)")
+
+                # Stage A summary
+                by_type = metrics["items_by_type"]
+                _log_progress(
+                    job,
+                    f"  Stage A ({metrics['extraction_time_ms']}ms): {sum(by_type.values())} items "
+                    f"({by_type['question']} questions, {by_type['commitment']} commitments, "
+                    f"{by_type['risk']} risks, {by_type['blocker']} blockers)",
+                )
+                # Stage B summary
+                rb = metrics["resolution_breakdown"]
+                _log_progress(
+                    job,
+                    f"  Stage B ({metrics['resolution_time_ms']}ms): "
+                    f"{rb['open']} open, {rb['ambiguous']} ambiguous, {rb['resolved']} resolved",
+                )
+                # Stage C summary (deterministic)
+                sb = metrics["severity_breakdown"]
+                _log_progress(
+                    job,
+                    f"  Stage C (severity): {sb['critical']} critical, {sb['high']} high, "
+                    f"{sb['medium']} medium, {sb['low']} low",
+                )
+
+                total_sec = metrics["total_time_ms"] / 1000
+                _log_progress(
+                    job,
+                    f"  ✓ Done in {total_sec:.1f}s — {len(items)} kept, "
+                    f"{metrics['grounding_drops']} dropped by grounding",
+                )
             except Exception as e:
                 _log_progress(job, f"  ⚠ Error: {e}")
 

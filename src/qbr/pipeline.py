@@ -311,18 +311,57 @@ def run_pipeline_for_thread(
     client: LLMClient,
     colleagues: list[Colleague],
     extraction_model: str = HAIKU_MODEL,
-) -> list[ExtractedItem]:
-    """Run the full 3-stage pipeline for a single thread."""
+) -> tuple[list[ExtractedItem], dict[str, Any]]:
+    """Run the full 3-stage pipeline for a single thread.
+
+    Returns (items, metrics) where metrics contains per-stage timing and counts.
+    """
+    import time
+
     logger.info("Processing thread: %s (%s)", thread.subject, thread.source_file)
 
     # Stage A: Extract items
+    t0 = time.monotonic()
     raw_items = stage_a_extract(thread, client, model=extraction_model)
+    extraction_time_ms = int((time.monotonic() - t0) * 1000)
+
+    items_by_type: dict[str, int] = {"commitment": 0, "question": 0, "risk": 0, "blocker": 0}
+    for raw in raw_items:
+        t = raw.get("item_type", "question")
+        if t in items_by_type:
+            items_by_type[t] += 1
 
     # Stage B: Track resolution
+    t0 = time.monotonic()
     resolved_items = stage_b_resolve(thread, raw_items, client, model=extraction_model)
+    resolution_time_ms = int((time.monotonic() - t0) * 1000)
+
+    resolution_breakdown: dict[str, int] = {"open": 0, "resolved": 0, "ambiguous": 0}
+    for r in resolved_items:
+        s = r.get("status", "open")
+        if s in resolution_breakdown:
+            resolution_breakdown[s] += 1
 
     # Stage C: Aging, severity, grounding
+    before_grounding = len(resolved_items)
     items = stage_c_aging_severity(resolved_items, thread, colleagues)
+    grounding_drops = before_grounding - len(items)
+
+    severity_breakdown: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for i in items:
+        sev = i.severity.value if hasattr(i.severity, "value") else str(i.severity)
+        if sev in severity_breakdown:
+            severity_breakdown[sev] += 1
+
+    metrics = {
+        "extraction_time_ms": extraction_time_ms,
+        "resolution_time_ms": resolution_time_ms,
+        "items_by_type": items_by_type,
+        "resolution_breakdown": resolution_breakdown,
+        "severity_breakdown": severity_breakdown,
+        "grounding_drops": grounding_drops,
+        "total_time_ms": extraction_time_ms + resolution_time_ms,
+    }
 
     logger.info(
         "Pipeline complete for %s: %d items (%d open)",
@@ -330,4 +369,4 @@ def run_pipeline_for_thread(
         len(items),
         sum(1 for i in items if i.status != ResolutionStatus.RESOLVED),
     )
-    return items
+    return items, metrics

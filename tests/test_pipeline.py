@@ -335,13 +335,22 @@ class TestFullPipeline:
 
         mock_client.complete.side_effect = [extraction_result, resolution_result]
 
-        items = run_pipeline_for_thread(sample_thread, mock_client, sample_colleagues)
+        items, metrics = run_pipeline_for_thread(sample_thread, mock_client, sample_colleagues)
 
         assert len(items) == 1
         assert items[0].status == ResolutionStatus.RESOLVED
         assert items[0].severity == "low"  # resolved → low
         assert items[0].source.person == "Alice"
         assert items[0].source.role == "PM"
+
+        # Metrics structure
+        assert "extraction_time_ms" in metrics
+        assert "items_by_type" in metrics
+        assert "resolution_breakdown" in metrics
+        assert "severity_breakdown" in metrics
+        assert "grounding_drops" in metrics
+        assert metrics["items_by_type"]["question"] == 1
+        assert metrics["resolution_breakdown"]["resolved"] == 1
 
         # LLM was called exactly twice (Stage A + Stage B)
         assert mock_client.complete.call_count == 2

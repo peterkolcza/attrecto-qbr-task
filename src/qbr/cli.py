@@ -146,7 +146,7 @@ def run(
                 progress.advance(task)
                 continue
             try:
-                items = run_pipeline_for_thread(
+                items, _metrics = run_pipeline_for_thread(
                     thread,
                     extraction_client,
                     colleagues=colleagues,
