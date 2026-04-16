@@ -278,3 +278,106 @@ class TestIncrementalFlagMerge:
         assert "active_project" in job
         # Starts None, but may have flipped by now since the pipeline runs async.
         # The key's presence is what matters for the dashboard contract.
+
+
+class TestProjectsStateEndpoint:
+    """Unit 3: GET /api/projects/state returns the live dashboard payload."""
+
+    def test_empty_state_returns_all_seeds_unknown(self, client):
+        resp = client.get("/api/projects/state")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["is_running"] is False
+        assert data["active_project"] is None
+        # All three seed projects present with unknown health
+        seed_names = {"Project Phoenix", "Project Omicron", "DivatKirály"}
+        assert set(data["projects"].keys()) == seed_names
+        for _, entry in data["projects"].items():
+            assert entry["health"] == "unknown"
+
+    def test_state_reflects_finalized_project(self, client):
+        from datetime import UTC, datetime
+
+        from qbr.models import (
+            AttentionFlag,
+            FlagStatus,
+            FlagType,
+            Severity,
+            SourceAttribution,
+        )
+
+        # Set up live state for one project
+        from qbr_web.app import _finalize_project_state
+
+        flag = AttentionFlag(
+            flag_type=FlagType.UNRESOLVED_ACTION,
+            title="t",
+            severity=Severity.CRITICAL,
+            project="Project Phoenix",
+            sources=[
+                SourceAttribution(
+                    person="Alice",
+                    email="a@x.com",
+                    timestamp=datetime.now(UTC),
+                )
+            ],
+            status=FlagStatus.OPEN,
+        )
+        _finalize_project_state({"Project Phoenix": [flag]}, job_id="jX")
+
+        resp = client.get("/api/projects/state")
+        data = resp.json()
+        assert data["projects"]["Project Phoenix"]["health"] == "critical"
+        assert data["projects"]["Project Phoenix"]["flag_count"] == 1
+        # flags list is NOT returned (polling payload is lean)
+        assert "flags" not in data["projects"]["Project Phoenix"]
+
+    def test_is_running_and_active_project_with_processing_job(self, client):
+        from qbr_web.app import jobs
+
+        jobs["j1"] = {
+            "id": "j1",
+            "source": "demo",
+            "state": "processing",
+            "progress": [],
+            "result": None,
+            "error": None,
+            "created_at": "2026-04-16T00:00:00+00:00",
+            "active_project": "Project Phoenix",
+        }
+        try:
+            resp = client.get("/api/projects/state")
+            data = resp.json()
+            assert data["is_running"] is True
+            assert data["active_project"] == "Project Phoenix"
+        finally:
+            del jobs["j1"]
+
+    def test_completed_job_does_not_mark_running(self, client):
+        from qbr_web.app import jobs
+
+        jobs["j2"] = {
+            "id": "j2",
+            "source": "demo",
+            "state": "complete",
+            "progress": [],
+            "result": {"usage": {}},
+            "error": None,
+            "created_at": "2026-04-16T00:00:00+00:00",
+            "active_project": None,
+        }
+        try:
+            resp = client.get("/api/projects/state")
+            data = resp.json()
+            assert data["is_running"] is False
+            assert data["active_project"] is None
+        finally:
+            del jobs["j2"]
+
+    def test_uploaded_project_not_in_seed_is_included(self, client):
+        from qbr_web.app import _merge_incremental_flags
+
+        _merge_incremental_flags("Custom Uploaded Project", [], "jU")
+        resp = client.get("/api/projects/state")
+        data = resp.json()
+        assert "Custom Uploaded Project" in data["projects"]

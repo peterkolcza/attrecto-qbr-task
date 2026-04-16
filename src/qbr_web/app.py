@@ -247,6 +247,49 @@ def _finalize_project_state(flags_by_project: dict[str, list[Any]], job_id: str)
         }
 
 
+def _build_projects_state_payload() -> dict[str, Any]:
+    """Build the dashboard state payload shared by GET / and GET /api/projects/state.
+
+    Shape:
+        {
+          "is_running": bool,
+          "active_project": str | None,
+          "projects": {name: {health, flag_count, critical_count, high_count,
+                              medium_count, low_count, last_updated}}
+        }
+
+    The per-project blob intentionally EXCLUDES 'flags' — that lives on the
+    drill-down endpoint, not on the frequently-polled one.
+    """
+    is_running = any(j["state"] in ("queued", "processing") for j in jobs.values())
+    active_project: str | None = None
+    if is_running:
+        for j in jobs.values():
+            if j["state"] in ("queued", "processing") and j.get("active_project"):
+                active_project = j["active_project"]
+                break
+
+    # Merge seed project names with live state. Live state wins. Projects in
+    # state but not in seed (from uploaded emails) also appear.
+    projects_payload: dict[str, dict[str, Any]] = {}
+    seed_names = {p["name"] for p in get_demo_projects()}
+    for name in seed_names:
+        live = project_state.get(name)
+        if live:
+            projects_payload[name] = {k: v for k, v in live.items() if k != "flags"}
+        else:
+            projects_payload[name] = {"health": "unknown"}
+    for name, live in project_state.items():
+        if name not in seed_names:
+            projects_payload[name] = {k: v for k, v in live.items() if k != "flags"}
+
+    return {
+        "is_running": is_running,
+        "active_project": active_project,
+        "projects": projects_payload,
+    }
+
+
 def _evict_old_jobs() -> None:
     """Remove oldest completed jobs if over MAX_JOBS limit."""
     if len(jobs) <= MAX_JOBS:
@@ -514,6 +557,16 @@ def _log_progress(job: dict[str, Any], message: str) -> None:
             "message": message,
         }
     )
+
+
+@app.get("/api/projects/state")
+async def projects_state():
+    """Live dashboard state for client-side polling.
+
+    Returned every 3s while is_running=true. The per-project blob excludes
+    the full flag list — drill-down data lives at /projects/{name}.
+    """
+    return _build_projects_state_payload()
 
 
 @app.get("/api/jobs/{job_id}/progress")
