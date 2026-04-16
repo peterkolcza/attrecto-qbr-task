@@ -16,6 +16,8 @@ dependencies = [
     "rapidfuzz>=3.14.5",
     "markdown>=3.10.2",
     "bleach>=6.3.0",
+    "bcrypt>=5.0.0",
+    "itsdangerous>=2.2.0",
 ]
 
 [project.optional-dependencies]
