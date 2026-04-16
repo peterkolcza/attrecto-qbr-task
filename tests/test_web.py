@@ -186,15 +186,22 @@ class TestProjectStateFinalize:
         assert "Project Omicron" not in project_state
         assert "DivatKirály" not in project_state
 
-    def test_finalize_preserves_higher_incremental_count(self):
-        """If Unit 2's incremental count is higher (defensive), keep the higher."""
+    def test_finalize_trims_to_prioritized_count(self):
+        """Final prioritized list is the source of truth — flag_count must equal
+        len(flags) so the drill-down header and list never disagree.
+        """
         from qbr_web.app import _finalize_project_state, project_state
 
-        # Simulate incremental state from Unit 2
-        project_state["Project Phoenix"] = {"flag_count": 5}
+        # Simulate incremental state that accumulated more flags than the final
+        # prioritized list will contain (prioritize_flags truncates to top 10).
+        project_state["Project Phoenix"] = {"flag_count": 15, "flags": []}
 
-        _finalize_project_state({"Project Phoenix": [self._make_flag("high")]}, job_id="job5")
-        assert project_state["Project Phoenix"]["flag_count"] == 5  # kept higher
+        final_flags = [self._make_flag("high")]
+        _finalize_project_state({"Project Phoenix": final_flags}, job_id="job5")
+
+        entry = project_state["Project Phoenix"]
+        assert entry["flag_count"] == 1  # trusts the final prioritized list
+        assert len(entry["flags"]) == 1  # flag_count and list length match
 
 
 class TestIncrementalFlagMerge:
@@ -510,6 +517,17 @@ class TestDashboardLiveRender:
         resp = client.get("/")
         # DivatKirály → DivatKir%C3%A1ly (UTF-8 encoded)
         assert "/projects/DivatKir%C3%A1ly" in resp.text
+
+    def test_drill_down_link_escapes_slash(self, client):
+        """strict_urlencode also escapes '/' so project names with slashes
+        don't silently produce a 404-routing link."""
+        from qbr_web.app import _merge_incremental_flags
+
+        _merge_incremental_flags("foo/bar", [], "jSlash")
+        resp = client.get("/")
+        # '/' should be %2F in the href, not a literal '/'
+        assert "/projects/foo%2Fbar" in resp.text
+        assert 'href="/projects/foo/bar"' not in resp.text
 
     def test_aria_live_region_present(self, client):
         resp = client.get("/")

@@ -29,7 +29,7 @@
         data-project-name="{{ proj.name }}">
 
         {# --- Clickable zone: name, health pill, counts, timestamp --- #}
-        <a href="/projects/{{ proj.name | urlencode }}"
+        <a href="/projects/{{ proj.name | strict_urlencode }}"
            class="block hover:bg-gray-50 -m-2 p-2 rounded transition cursor-pointer">
             <div class="flex items-center justify-between mb-2">
                 <h3 class="font-semibold">{{ proj.name }}</h3>
@@ -225,6 +225,8 @@
     ];
 
     let pollTimer = null;
+    let polling = false;           // true while a fetch is in flight
+    let consecutiveFailures = 0;   // for exponential backoff on poll errors
     const lastAnnouncedHealth = {};
 
     function formatRelative(isoStr) {
@@ -326,7 +328,13 @@
             const badge = document.createElement('span');
             badge.className = 'active-badge inline-block text-xs px-2 py-0.5 rounded bg-blue-100 text-blue-800 animate-pulse mt-1';
             badge.textContent = 'Analysis in progress';
-            if (countsEl && countsEl.parentElement) countsEl.parentElement.insertBefore(badge, countsEl.nextSibling);
+            // Prefer placing after the counts block; fall back to the pill row
+            // if the project is still health='unknown' (no counts yet).
+            if (countsEl && countsEl.parentElement) {
+                countsEl.parentElement.insertBefore(badge, countsEl.nextSibling);
+            } else if (pill && pill.parentElement && pill.parentElement.parentElement) {
+                pill.parentElement.parentElement.insertBefore(badge, pill.parentElement.nextSibling);
+            }
         } else if (name !== activeProject && existingBadge) {
             existingBadge.remove();
         }
@@ -340,9 +348,13 @@
     }
 
     async function poll() {
+        pollTimer = null;
+        polling = true;
         try {
             const resp = await fetch('/api/projects/state');
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
+            consecutiveFailures = 0;
             grid.dataset.isRunning = data.is_running ? 'true' : 'false';
             grid.dataset.activeProject = data.active_project || '';
             Object.entries(data.projects).forEach(([name, state]) => {
@@ -350,19 +362,36 @@
             });
             if (data.is_running) {
                 pollTimer = setTimeout(poll, POLL_MS);
-            } else {
-                pollTimer = null;
             }
         } catch (e) {
             console.error('dashboard poll error:', e);
-            pollTimer = setTimeout(poll, POLL_MS);
+            // Exponential backoff capped at 60s so a flapping backend does
+            // not amplify into a retry storm across many open tabs.
+            consecutiveFailures += 1;
+            const delay = Math.min(POLL_MS * 2 ** (consecutiveFailures - 1), 60_000);
+            pollTimer = setTimeout(poll, delay);
+        } finally {
+            polling = false;
         }
     }
 
     function ensurePolling() {
-        if (pollTimer) return;
+        // Guard on both pollTimer (scheduled next tick) and polling
+        // (in-flight fetch) so rapid visibility flips do not spawn
+        // duplicate poll chains.
+        if (pollTimer || polling) return;
         poll();
     }
+
+    // Refresh relative timestamps once on load (server renders 'Updated just
+    // now' as a placeholder); then every minute.
+    function refreshTimestamps() {
+        grid.querySelectorAll('.last-updated').forEach(el => {
+            if (el.dataset.iso) el.textContent = formatRelative(el.dataset.iso);
+        });
+    }
+    refreshTimestamps();
+    setInterval(refreshTimestamps, 60_000);
 
     if (grid.dataset.isRunning === 'true') ensurePolling();
 
@@ -370,13 +399,6 @@
         if (!document.hidden) ensurePolling();
     });
     window.addEventListener('pageshow', ensurePolling);
-
-    // Refresh relative timestamps once a minute even when idle.
-    setInterval(() => {
-        grid.querySelectorAll('.last-updated').forEach(el => {
-            if (el.dataset.iso) el.textContent = formatRelative(el.dataset.iso);
-        });
-    }, 60_000);
 })();
 </script>
 {% endblock %}

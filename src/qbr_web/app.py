@@ -111,6 +111,20 @@ def _md_to_html(text: str) -> str:
 
 templates.env.filters["markdown"] = _md_to_html
 
+
+def _strict_urlencode(value: str) -> str:
+    """Like Jinja's `urlencode` but also escapes '/' — important for path params.
+
+    Jinja's builtin leaves '/' untouched, which breaks FastAPI's default `{name}`
+    path-param converter when a project name contains a slash.
+    """
+    from urllib.parse import quote
+
+    return quote(str(value), safe="")
+
+
+templates.env.filters["strict_urlencode"] = _strict_urlencode
+
 SAMPLE_DATA_DIR = Path(__file__).parent.parent.parent / "task" / "sample_data"
 
 # In-memory job store (evicts oldest when exceeding MAX_JOBS)
@@ -161,8 +175,10 @@ def _merge_incremental_flags(project: str, new_flags: list[Any], job_id: str) ->
 
     if not new_flags:
         # Ensure the project appears in state even before first flag lands
-        # (so dashboard can show active flash + 0 flags).
-        project_state.setdefault(
+        # (so dashboard can show active flash + 0 flags). Also refresh
+        # last_updated / latest_job_id so pre-existing entries don't keep
+        # pointing at a prior run while a new one is in progress.
+        entry = project_state.setdefault(
             project,
             {
                 "health": "good",
@@ -176,6 +192,8 @@ def _merge_incremental_flags(project: str, new_flags: list[Any], job_id: str) ->
                 "latest_job_id": job_id,
             },
         )
+        entry["last_updated"] = datetime.now(UTC).isoformat()
+        entry["latest_job_id"] = job_id
         return
 
     serialized_new = [
@@ -224,11 +242,15 @@ def _finalize_project_state(flags_by_project: dict[str, list[Any]], job_id: str)
         final_counts = _count_by_severity(flags)
         final_count = len(flags)
 
+        # The incremental path (Unit 2) can accumulate more raw flags than the
+        # end-of-run prioritized list (which truncates to top 10 per project).
+        # Trust the final prioritized list as the source of truth — mismatches
+        # between flag_count and len(flags) would mislead the drill-down page.
         existing = project_state.get(project_name, {})
         existing_count = existing.get("flag_count", 0)
         if existing_count > final_count:
-            logger.warning(
-                "project_state[%s] incremental count %d > final %d; keeping higher",
+            logger.info(
+                "project_state[%s]: incremental count %d trimmed to final %d after prioritization",
                 project_name,
                 existing_count,
                 final_count,
@@ -236,7 +258,7 @@ def _finalize_project_state(flags_by_project: dict[str, list[Any]], job_id: str)
 
         project_state[project_name] = {
             "health": _health_from_flags(flags),
-            "flag_count": max(final_count, existing_count),
+            "flag_count": final_count,
             "critical_count": final_counts["critical"],
             "high_count": final_counts["high"],
             "medium_count": final_counts["medium"],
@@ -509,13 +531,18 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
                 )
             except Exception as e:
                 _log_progress(job, f"  ⚠ Error: {e}")
-
-            # Unit 2: hold active_project for at least ACTIVE_PROJECT_MIN_HOLD_S
-            # so short threads are still visible to a 3s poll, then clear.
-            elapsed = time.monotonic() - t_start
-            if elapsed < ACTIVE_PROJECT_MIN_HOLD_S:
-                await asyncio.sleep(ACTIVE_PROJECT_MIN_HOLD_S - elapsed)
-            job["active_project"] = None
+            finally:
+                # Clear in finally so CancelledError (asyncio.BaseException)
+                # and other non-Exception unwinds do not leave a stale flash.
+                # The min-hold sleep only runs on normal/Exception paths —
+                # a cancellation skips it and proceeds straight to clear.
+                try:
+                    elapsed = time.monotonic() - t_start
+                    if elapsed < ACTIVE_PROJECT_MIN_HOLD_S:
+                        await asyncio.sleep(ACTIVE_PROJECT_MIN_HOLD_S - elapsed)
+                except (asyncio.CancelledError, Exception):
+                    pass
+                job["active_project"] = None
 
         # Defensive: unconditionally clear before classification/report generation.
         job["active_project"] = None
