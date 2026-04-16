@@ -13,6 +13,16 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def clear_jobs():
+    """Clear the in-memory job store before each test for isolation."""
+    from qbr_web.app import jobs
+
+    jobs.clear()
+    yield
+    jobs.clear()
+
+
 class TestHealthcheck:
     def test_healthz(self, client):
         resp = client.get("/healthz")
@@ -55,6 +65,27 @@ class TestAnalyze:
     def test_job_not_found(self, client):
         resp = client.get("/jobs/nonexistent")
         assert resp.status_code == 404
+
+    def test_duplicate_demo_returns_existing_job(self, client):
+        """Clicking 'Process Demo Emails' while demo is running should redirect to existing job."""
+        from qbr_web.app import jobs
+
+        # Pre-create a running demo job
+        jobs["abc12345"] = {
+            "id": "abc12345",
+            "source": "demo",
+            "state": "processing",
+            "progress": [],
+            "result": None,
+            "error": None,
+            "created_at": "2026-04-16T00:00:00+00:00",
+        }
+        try:
+            resp = client.post("/analyze", follow_redirects=False)
+            assert resp.status_code == 303
+            assert resp.headers["location"] == "/jobs/abc12345"
+        finally:
+            del jobs["abc12345"]
 
 
 class TestSSEStream:

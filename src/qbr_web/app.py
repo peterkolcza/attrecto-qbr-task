@@ -115,11 +115,27 @@ async def healthz():
 
 @app.post("/analyze")
 async def start_analysis(request: Request, files: list[UploadFile] | None = None):
-    """Start an analysis job. Uses demo data if no files uploaded."""
+    """Start an analysis job. Uses demo data if no files uploaded.
+
+    If a demo analysis is already running, redirects to it instead of starting a duplicate.
+    """
     _evict_old_jobs()
+
+    is_demo = not (files and any(f.filename for f in files))
+
+    # Dedup: if a demo job is already running, redirect to it
+    if is_demo:
+        for existing_id, existing_job in jobs.items():
+            if existing_job.get("source") == "demo" and existing_job["state"] in (
+                "queued",
+                "processing",
+            ):
+                return RedirectResponse(url=f"/jobs/{existing_id}", status_code=303)
+
     job_id = str(uuid.uuid4())[:8]
     jobs[job_id] = {
         "id": job_id,
+        "source": "demo" if is_demo else "upload",
         "state": "queued",
         "progress": [],
         "result": None,
@@ -130,20 +146,19 @@ async def start_analysis(request: Request, files: list[UploadFile] | None = None
     # Determine input source
     MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5 MB per file
     MAX_FILES = 50
-    if files and any(f.filename for f in files):
+    if not is_demo:
         upload_dir = Path(f"/tmp/qbr_uploads/{job_id}")
         upload_dir.mkdir(parents=True, exist_ok=True)
         file_count = 0
-        for f in files:
+        for f in files or []:
             if not f.filename:
                 continue
-            # Sanitize filename: strip directory components (prevent path traversal)
             safe_name = Path(f.filename).name
             if not safe_name.endswith(".txt"):
                 continue
             content = await f.read(MAX_UPLOAD_SIZE + 1)
             if len(content) > MAX_UPLOAD_SIZE:
-                continue  # skip oversized files
+                continue
             (upload_dir / safe_name).write_bytes(content)
             file_count += 1
             if file_count >= MAX_FILES:
@@ -161,11 +176,9 @@ async def start_analysis(request: Request, files: list[UploadFile] | None = None
             status_code=429,
         )
 
-    # Run analysis in background (store task ref to prevent GC warnings)
     task = asyncio.create_task(_run_analysis(job_id, input_dir))
     jobs[job_id]["_task"] = task
 
-    # Redirect browser to job progress page
     return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
 
 
