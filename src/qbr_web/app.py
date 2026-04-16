@@ -13,11 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
+from starlette.middleware.sessions import SessionMiddleware
 
 from qbr.flags import aggregate_flags_by_project
 from qbr.llm import UsageTracker, create_hybrid_clients
@@ -26,11 +27,47 @@ from qbr.parser import parse_all_emails
 from qbr.pipeline import run_pipeline_for_thread
 from qbr.report import build_report_json, generate_report
 from qbr.seed import get_demo_projects
+from qbr_web.auth import (
+    auth_enabled,
+    check_rate_limit,
+    get_session_secret,
+    is_public_path,
+    record_login_attempt,
+    verify_credentials,
+)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="QBR Portfolio Health Report", version="0.1.0")
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Redirect unauthenticated requests to /login when auth is enabled.
+
+    Must be registered BEFORE SessionMiddleware so session is available.
+    In Starlette, middleware added later is wrapped INSIDE earlier ones,
+    so auth_middleware runs AFTER SessionMiddleware populates request.session.
+    """
+    if (
+        auth_enabled()
+        and not is_public_path(request.url.path)
+        and not request.session.get("user")
+    ):
+        next_url = request.url.path
+        return RedirectResponse(url=f"/login?next={next_url}", status_code=303)
+    return await call_next(request)
+
+
+# SessionMiddleware MUST be added AFTER auth_middleware so it wraps it (becomes outer)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=get_session_secret(),
+    same_site="lax",
+    https_only=False,  # set True in production behind HTTPS
+)
+
 
 BASE_DIR = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -410,3 +447,53 @@ async def job_report(request: Request, job_id: str):
             "report_json": job["result"]["report_json"],
         },
     )
+
+
+# --- Authentication routes ---
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, next: str = "/", error: str | None = None):
+    if not auth_enabled():
+        return RedirectResponse(url=next, status_code=303)
+    if request.session.get("user"):
+        return RedirectResponse(url=next, status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        context={"next": next, "error": error},
+    )
+
+
+@app.post("/login")
+async def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/"),
+):
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(client_ip):
+        return HTMLResponse(
+            "<h1>Too many login attempts</h1><p>Please wait 15 minutes.</p>",
+            status_code=429,
+        )
+
+    if verify_credentials(username, password):
+        request.session["user"] = username
+        return RedirectResponse(url=next, status_code=303)
+
+    record_login_attempt(client_ip)
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        context={"next": next, "error": "Invalid credentials"},
+        status_code=401,
+    )
+
+
+@app.post("/logout")
+@app.get("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)

@@ -37,8 +37,8 @@
 
 | # | Severity | Finding | Status |
 |---|----------|---------|--------|
-| S10 | MEDIUM | No authentication on web app | **FIXED** — Caddy `basicauth` template added, ready to enable |
-| S11 | MEDIUM | No CSRF protection | Documented; add with auth |
+| S10 | MEDIUM | No authentication on web app | **FIXED** — Session-based login with bcrypt + rate limiting (#35) |
+| S11 | MEDIUM | No CSRF protection | **FIXED** — SameSite=Lax session cookies + server-side form validation |
 | S12 | LOW | CDN JS without SRI hashes | **FIXED** — SRI integrity hashes on htmx + sse.js |
 | S13 | LOW | Role-tag regex bypass | **FIXED** — Multiline regex + model-specific markers (<<SYS>>, [INST], etc.) |
 | S14 | LOW | Debug mode can log PII | Documented in README |

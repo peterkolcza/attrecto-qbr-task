@@ -260,6 +260,19 @@ def smoke_test(
         raise typer.Exit(code=1) from e
 
 
+@app.command(name="hash-password")
+def hash_password(
+    password: str = typer.Argument(..., help="Plaintext password to hash"),
+) -> None:
+    """Generate a bcrypt hash for the QBR_AUTH_PASSWORD_HASH env var."""
+    from qbr_web.auth import hash_password as _hash
+
+    result = _hash(password)
+    console.print(f"[cyan]Bcrypt hash:[/cyan]\n{result}\n")
+    console.print("Add this to your .env file:")
+    console.print(f'[green]QBR_AUTH_PASSWORD_HASH="{result}"[/green]')
+
+
 @app.command(name="seed-demo")
 def seed_demo() -> None:
     """Show demo project data that will be pre-loaded in the dashboard."""
