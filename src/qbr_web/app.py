@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -20,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from qbr.flags import aggregate_flags_by_project
+from qbr.flags import aggregate_flags_by_project, classify_flags
 from qbr.llm import UsageTracker, create_hybrid_clients
 from qbr.models import ExtractedItem  # noqa: TC001
 from qbr.parser import parse_all_emails
@@ -50,11 +51,7 @@ async def auth_middleware(request: Request, call_next):
     In Starlette, middleware added later is wrapped INSIDE earlier ones,
     so auth_middleware runs AFTER SessionMiddleware populates request.session.
     """
-    if (
-        auth_enabled()
-        and not is_public_path(request.url.path)
-        and not request.session.get("user")
-    ):
+    if auth_enabled() and not is_public_path(request.url.path) and not request.session.get("user"):
         next_url = request.url.path
         return RedirectResponse(url=f"/login?next={next_url}", status_code=303)
     return await call_next(request)
@@ -114,11 +111,205 @@ def _md_to_html(text: str) -> str:
 
 templates.env.filters["markdown"] = _md_to_html
 
+
+def _strict_urlencode(value: str) -> str:
+    """Like Jinja's `urlencode` but also escapes '/' — important for path params.
+
+    Jinja's builtin leaves '/' untouched, which breaks FastAPI's default `{name}`
+    path-param converter when a project name contains a slash.
+    """
+    from urllib.parse import quote
+
+    return quote(str(value), safe="")
+
+
+templates.env.filters["strict_urlencode"] = _strict_urlencode
+
 SAMPLE_DATA_DIR = Path(__file__).parent.parent.parent / "task" / "sample_data"
 
 # In-memory job store (evicts oldest when exceeding MAX_JOBS)
 MAX_JOBS = 20
 jobs: dict[str, dict[str, Any]] = {}
+
+# In-memory live project health state — overlays seed data on the dashboard.
+# Keyed by project name. Not persisted across server restart (matches jobs dict).
+project_state: dict[str, dict[str, Any]] = {}
+
+
+def _health_from_flags(flags: list[Any]) -> str:
+    """Map a list of AttentionFlag (or dicts) to a health label.
+
+    Rule:
+    - any flag with severity=critical  → 'critical'
+    - any flag with any other severity → 'warning'
+    - empty flag list                  → 'good'
+    """
+    if not flags:
+        return "good"
+    for f in flags:
+        sev = f.severity if hasattr(f, "severity") else f.get("severity")
+        sev_str = str(sev)
+        if sev_str == "critical" or sev_str.endswith(".CRITICAL"):
+            return "critical"
+    return "warning"
+
+
+def _count_by_severity(flags: list[Any]) -> dict[str, int]:
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for f in flags:
+        sev = f.severity if hasattr(f, "severity") else f.get("severity")
+        sev_str = str(sev).split(".")[-1].lower()
+        if sev_str in counts:
+            counts[sev_str] += 1
+    return counts
+
+
+def _merge_incremental_flags(project: str, new_flags: list[Any], job_id: str) -> None:
+    """Merge per-thread flags into project_state as extraction progresses (R6).
+
+    Called during the per-thread loop in _run_analysis so dashboard flag counts
+    rise incrementally. _finalize_project_state still runs at end of job to
+    apply cross-project conflict detection and replace the final counts.
+    """
+    from qbr.models import AttentionFlag
+
+    if not new_flags:
+        # Ensure the project appears in state even before first flag lands
+        # (so dashboard can show active flash + 0 flags). Also refresh
+        # last_updated / latest_job_id so pre-existing entries don't keep
+        # pointing at a prior run while a new one is in progress.
+        entry = project_state.setdefault(
+            project,
+            {
+                "health": "good",
+                "flag_count": 0,
+                "critical_count": 0,
+                "high_count": 0,
+                "medium_count": 0,
+                "low_count": 0,
+                "flags": [],
+                "last_updated": datetime.now(UTC).isoformat(),
+                "latest_job_id": job_id,
+            },
+        )
+        entry["last_updated"] = datetime.now(UTC).isoformat()
+        entry["latest_job_id"] = job_id
+        return
+
+    serialized_new = [
+        f.model_dump(mode="json") if isinstance(f, AttentionFlag) else f for f in new_flags
+    ]
+    entry = project_state.setdefault(
+        project,
+        {
+            "health": "good",
+            "flag_count": 0,
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "low_count": 0,
+            "flags": [],
+            "last_updated": datetime.now(UTC).isoformat(),
+            "latest_job_id": job_id,
+        },
+    )
+    entry["flags"].extend(serialized_new)
+    entry["flag_count"] = len(entry["flags"])
+    counts = _count_by_severity(entry["flags"])
+    entry["critical_count"] = counts["critical"]
+    entry["high_count"] = counts["high"]
+    entry["medium_count"] = counts["medium"]
+    entry["low_count"] = counts["low"]
+    entry["health"] = _health_from_flags(entry["flags"])
+    entry["last_updated"] = datetime.now(UTC).isoformat()
+    entry["latest_job_id"] = job_id
+
+
+def _finalize_project_state(flags_by_project: dict[str, list[Any]], job_id: str) -> None:
+    """Write final state for every project that produced flags.
+
+    Called at end of run after aggregate_flags_by_project. Merges with whatever
+    Unit 2's per-thread classification already accumulated — does not clobber
+    incremental progress if higher.
+    """
+    from qbr.models import AttentionFlag
+
+    now_iso = datetime.now(UTC).isoformat()
+    for project_name, flags in flags_by_project.items():
+        serialized = [
+            f.model_dump(mode="json") if isinstance(f, AttentionFlag) else f for f in flags
+        ]
+        final_counts = _count_by_severity(flags)
+        final_count = len(flags)
+
+        # The incremental path (Unit 2) can accumulate more raw flags than the
+        # end-of-run prioritized list (which truncates to top 10 per project).
+        # Trust the final prioritized list as the source of truth — mismatches
+        # between flag_count and len(flags) would mislead the drill-down page.
+        existing = project_state.get(project_name, {})
+        existing_count = existing.get("flag_count", 0)
+        if existing_count > final_count:
+            logger.info(
+                "project_state[%s]: incremental count %d trimmed to final %d after prioritization",
+                project_name,
+                existing_count,
+                final_count,
+            )
+
+        project_state[project_name] = {
+            "health": _health_from_flags(flags),
+            "flag_count": final_count,
+            "critical_count": final_counts["critical"],
+            "high_count": final_counts["high"],
+            "medium_count": final_counts["medium"],
+            "low_count": final_counts["low"],
+            "flags": serialized,
+            "last_updated": now_iso,
+            "latest_job_id": job_id,
+        }
+
+
+def _build_projects_state_payload() -> dict[str, Any]:
+    """Build the dashboard state payload shared by GET / and GET /api/projects/state.
+
+    Shape:
+        {
+          "is_running": bool,
+          "active_project": str | None,
+          "projects": {name: {health, flag_count, critical_count, high_count,
+                              medium_count, low_count, last_updated}}
+        }
+
+    The per-project blob intentionally EXCLUDES 'flags' — that lives on the
+    drill-down endpoint, not on the frequently-polled one.
+    """
+    is_running = any(j["state"] in ("queued", "processing") for j in jobs.values())
+    active_project: str | None = None
+    if is_running:
+        for j in jobs.values():
+            if j["state"] in ("queued", "processing") and j.get("active_project"):
+                active_project = j["active_project"]
+                break
+
+    # Merge seed project names with live state. Live state wins. Projects in
+    # state but not in seed (from uploaded emails) also appear.
+    projects_payload: dict[str, dict[str, Any]] = {}
+    seed_names = {p["name"] for p in get_demo_projects()}
+    for name in seed_names:
+        live = project_state.get(name)
+        if live:
+            projects_payload[name] = {k: v for k, v in live.items() if k != "flags"}
+        else:
+            projects_payload[name] = {"health": "unknown"}
+    for name, live in project_state.items():
+        if name not in seed_names:
+            projects_payload[name] = {k: v for k, v in live.items() if k != "flags"}
+
+    return {
+        "is_running": is_running,
+        "active_project": active_project,
+        "projects": projects_payload,
+    }
 
 
 def _evict_old_jobs() -> None:
@@ -134,13 +325,28 @@ def _evict_old_jobs() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    payload = _build_projects_state_payload()
+    # Merge seed metadata (PM, team, q3_focus) with live state per project.
+    seed_projects = get_demo_projects()
+    seed_by_name = {p["name"]: p for p in seed_projects}
+    projects_view = []
+    for name, live in payload["projects"].items():
+        base = seed_by_name.get(name, {"name": name, "team": [], "team_size": 0})
+        merged = {**base, **live, "name": name}  # live overrides health
+        projects_view.append(merged)
+    # Preserve seed order for seed projects; uploaded-only projects follow.
+    seed_order = {p["name"]: i for i, p in enumerate(seed_projects)}
+    projects_view.sort(key=lambda p: seed_order.get(p["name"], 999))
+
     return templates.TemplateResponse(
         request,
         "index.html",
         context={
             "jobs": list(jobs.items()),
             "has_sample_data": SAMPLE_DATA_DIR.exists(),
-            "projects": get_demo_projects(),
+            "projects": projects_view,
+            "is_running": payload["is_running"],
+            "active_project": payload["active_project"],
         },
     )
 
@@ -178,6 +384,7 @@ async def start_analysis(request: Request, files: list[UploadFile] | None = None
         "result": None,
         "error": None,
         "created_at": datetime.now(UTC).isoformat(),
+        "active_project": None,
     }
 
     # Determine input source
@@ -254,6 +461,7 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
 
         # Step 2: Extract per thread
         all_items: dict[str, list[ExtractedItem]] = defaultdict(list)
+        ACTIVE_PROJECT_MIN_HOLD_S = 1.5
         for i, thread in enumerate(threads):
             if not thread.messages:
                 continue
@@ -261,6 +469,9 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
             # Detailed per-email header
             first_msg = thread.messages[0]
             off_topic_count = sum(1 for m in thread.messages if m.is_off_topic)
+            project_for_flash = thread.project or "Unknown"
+            job["active_project"] = project_for_flash
+            t_start = time.monotonic()
             _log_progress(
                 job, f'[{i + 1}/{len(threads)}] {thread.source_file} — "{thread.subject[:80]}"'
             )
@@ -282,6 +493,12 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
                 )
                 project = thread.project or "Unknown"
                 all_items[project].extend(items)
+
+                # Unit 2: classify this thread's flags immediately so dashboard
+                # counts rise incrementally (R6). detect_conflicts is NOT run
+                # per-thread — it needs the full item list, runs at end of job.
+                per_thread_flags = await asyncio.to_thread(classify_flags, items, project)
+                _merge_incremental_flags(project, per_thread_flags, job_id)
 
                 # Stage A summary
                 by_type = metrics["items_by_type"]
@@ -314,6 +531,21 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
                 )
             except Exception as e:
                 _log_progress(job, f"  ⚠ Error: {e}")
+            finally:
+                # Clear in finally so CancelledError (asyncio.BaseException)
+                # and other non-Exception unwinds do not leave a stale flash.
+                # The min-hold sleep only runs on normal/Exception paths —
+                # a cancellation skips it and proceeds straight to clear.
+                try:
+                    elapsed = time.monotonic() - t_start
+                    if elapsed < ACTIVE_PROJECT_MIN_HOLD_S:
+                        await asyncio.sleep(ACTIVE_PROJECT_MIN_HOLD_S - elapsed)
+                except (asyncio.CancelledError, Exception):
+                    pass
+                job["active_project"] = None
+
+        # Defensive: unconditionally clear before classification/report generation.
+        job["active_project"] = None
 
         total_items = sum(len(v) for v in all_items.values())
         _log_progress(job, f"Extraction complete: {total_items} items total")
@@ -323,6 +555,10 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
         flags_by_project = await asyncio.to_thread(aggregate_flags_by_project, all_items)
         total_flags = sum(len(f) for f in flags_by_project.values())
         _log_progress(job, f"{total_flags} flags triggered")
+
+        # Populate live dashboard state so cards reflect the new run even if
+        # report generation fails downstream.
+        _finalize_project_state(flags_by_project, job_id)
 
         # Step 4: Generate report
         _log_progress(job, f"Generating report ({synthesis_model})...")
@@ -344,6 +580,7 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
     except Exception as e:
         job["state"] = "error"
         job["error"] = "Analysis failed. Check server logs for details."
+        job["active_project"] = None  # clear flash on fatal error
         _log_progress(job, "Error: analysis failed")
         logger.exception("Analysis failed for job %s: %s", job_id, e)
     finally:
@@ -362,6 +599,16 @@ def _log_progress(job: dict[str, Any], message: str) -> None:
             "message": message,
         }
     )
+
+
+@app.get("/api/projects/state")
+async def projects_state():
+    """Live dashboard state for client-side polling.
+
+    Returned every 3s while is_running=true. The per-project blob excludes
+    the full flag list — drill-down data lives at /projects/{name}.
+    """
+    return _build_projects_state_payload()
 
 
 @app.get("/api/jobs/{job_id}/progress")
@@ -423,6 +670,78 @@ async def job_stream(job_id: str):
             await asyncio.sleep(0.5)
 
     return EventSourceResponse(event_generator())
+
+
+@app.get("/projects/{name}", response_class=HTMLResponse)
+async def project_detail(request: Request, name: str):
+    """Drill-down page showing all flags for a single project."""
+    seed_names = {p["name"]: p for p in get_demo_projects()}
+    state = project_state.get(name)
+    seed = seed_names.get(name)
+
+    # 404 when the name is neither in seed nor in state (forgiving 200
+    # would let the URL namespace be infinite).
+    if seed is None and state is None:
+        return HTMLResponse("<h1>Project not found</h1>", status_code=404)
+
+    # Empty state #1: seed project, never analyzed
+    if state is None:
+        return templates.TemplateResponse(
+            request,
+            "project_detail.html",
+            context={
+                "name": name,
+                "seed": seed or {},
+                "state": None,
+                "empty_state": "never_analyzed",
+                "report_link": None,
+                "status_counts": None,
+            },
+        )
+
+    # Compute status counts from stored flags
+    flags = state.get("flags", [])
+    status_counts = {"open": 0, "needs_review": 0, "resolved": 0}
+    for f in flags:
+        st = f.get("status", "open")
+        if st in status_counts:
+            status_counts[st] += 1
+
+    # Report link: usable only when the originating job is still in memory
+    latest_job_id = state.get("latest_job_id")
+    job = jobs.get(latest_job_id) if latest_job_id else None
+    if job and job.get("state") == "complete":
+        report_link = {"url": f"/jobs/{latest_job_id}/report", "available": True}
+    else:
+        report_link = {"url": None, "available": False}
+
+    # Empty state #2: analyzed but zero flags
+    if state.get("flag_count", 0) == 0:
+        return templates.TemplateResponse(
+            request,
+            "project_detail.html",
+            context={
+                "name": name,
+                "seed": seed or {},
+                "state": state,
+                "empty_state": "all_clear",
+                "report_link": report_link,
+                "status_counts": status_counts,
+            },
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "project_detail.html",
+        context={
+            "name": name,
+            "seed": seed or {},
+            "state": state,
+            "empty_state": None,
+            "report_link": report_link,
+            "status_counts": status_counts,
+        },
+    )
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)

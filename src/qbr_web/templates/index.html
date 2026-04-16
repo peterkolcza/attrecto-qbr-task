@@ -2,33 +2,88 @@
 {% block title %}QBR — Director Dashboard{% endblock %}
 {% block content %}
 
+{# --- Health-label helpers kept inline so the template stays one file --- #}
+{% set health_labels = {
+    'critical': 'Critical — act now',
+    'warning':  'Attention needed',
+    'good':     'On track',
+    'unknown':  'Pending analysis'
+} %}
+
+<!-- Screen-reader live region for health transitions -->
+<div id="dashboard-live-region" role="status" aria-live="polite" class="sr-only"></div>
+
 <!-- Project Portfolio Overview -->
 <h2 class="text-lg font-semibold mb-4">Portfolio Overview</h2>
-<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+<div id="project-grid"
+     class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6"
+     data-is-running="{{ 'true' if is_running else 'false' }}"
+     data-active-project="{{ active_project or '' }}">
     {% for proj in projects %}
-    <div class="bg-white rounded-lg shadow p-4 border-l-4
+    <div class="project-card bg-white rounded-lg shadow p-4 border-l-4 border-2
         {% if proj.health == 'critical' %}border-red-500
         {% elif proj.health == 'warning' %}border-yellow-500
         {% elif proj.health == 'good' %}border-green-500
-        {% else %}border-gray-300{% endif %}">
-        <div class="flex items-center justify-between mb-2">
-            <h3 class="font-semibold">{{ proj.name }}</h3>
-            <span class="text-xs px-2 py-1 rounded
-                {% if proj.health == 'unknown' %}bg-gray-100 text-gray-600{% endif %}">
-                {% if proj.health == 'unknown' %}Pending analysis{% else %}{{ proj.health }}{% endif %}
-            </span>
-        </div>
-        <div class="text-sm text-gray-600 space-y-1">
-            <p><strong>PM:</strong> {{ proj.pm.split('(')[0] }}</p>
-            <p><strong>Team:</strong> {{ proj.team_size }} members</p>
-            <p><strong>QBR:</strong> {{ proj.qbr_date }}</p>
-            <p><strong>Focus:</strong> {{ proj.q3_focus[:80] }}{% if proj.q3_focus|length > 80 %}...{% endif %}</p>
-        </div>
+        {% else %}border-gray-300{% endif %}
+        {% if active_project and active_project == proj.name %} qbr-active-flash{% endif %}"
+        data-project-name="{{ proj.name }}">
+
+        {# --- Clickable zone: name, health pill, counts, timestamp --- #}
+        <a href="/projects/{{ proj.name | strict_urlencode }}"
+           class="block hover:bg-gray-50 -m-2 p-2 rounded transition cursor-pointer">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="font-semibold">{{ proj.name }}</h3>
+                <span class="health-pill text-xs px-2 py-1 rounded
+                    {% if proj.health == 'critical' %}bg-red-100 text-red-800
+                    {% elif proj.health == 'warning' %}bg-yellow-100 text-yellow-800
+                    {% elif proj.health == 'good' %}bg-green-100 text-green-800
+                    {% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {{ health_labels[proj.health] if proj.health in health_labels else 'Pending analysis' }}
+                </span>
+            </div>
+
+            {# Flag counts when analyzed #}
+            {% if proj.health in ('critical', 'warning', 'good') %}
+            <div class="flag-counts text-sm mb-1" data-flag-count="{{ proj.flag_count or 0 }}">
+                <span class="flag-count-total font-medium">{{ proj.flag_count or 0 }} flags</span>
+                {% if proj.flag_count and proj.flag_count > 0 %}
+                <span class="flag-count-breakdown text-xs text-gray-500 ml-1">
+                    {% if proj.critical_count %}<span class="text-red-700">{{ proj.critical_count }} critical</span>{% endif %}
+                    {% if proj.critical_count and proj.high_count %} · {% endif %}
+                    {% if proj.high_count %}<span class="text-orange-700">{{ proj.high_count }} high</span>{% endif %}
+                    {% if (proj.critical_count or proj.high_count) and (proj.medium_count or proj.low_count) %} · {% endif %}
+                    {% if proj.medium_count %}<span class="text-yellow-700">{{ proj.medium_count }} med</span>{% endif %}
+                    {% if proj.medium_count and proj.low_count %} · {% endif %}
+                    {% if proj.low_count %}<span class="text-gray-600">{{ proj.low_count }} low</span>{% endif %}
+                </span>
+                {% endif %}
+            </div>
+            {% if proj.last_updated %}
+            <p class="last-updated text-xs text-gray-400 mb-1"
+               data-iso="{{ proj.last_updated }}"
+               title="{{ proj.last_updated }}">Updated just now</p>
+            {% endif %}
+            {% endif %}
+
+            {# Active-card badge #}
+            {% if active_project and active_project == proj.name %}
+            <span class="active-badge inline-block text-xs px-2 py-0.5 rounded bg-blue-100 text-blue-800 animate-pulse">Analysis in progress</span>
+            {% endif %}
+
+            <div class="text-sm text-gray-600 space-y-1 mt-2">
+                <p><strong>PM:</strong> {{ (proj.pm or '').split('(')[0] }}</p>
+                <p><strong>QBR:</strong> {{ proj.qbr_date or '—' }}</p>
+                <p><strong>Focus:</strong> {{ (proj.q3_focus or '')[:80] }}{% if (proj.q3_focus or '')|length > 80 %}...{% endif %}</p>
+            </div>
+        </a>
+
+        {# --- NON-clickable zone: known risks + team details (kept OUTSIDE the <a>) --- #}
         {% if proj.known_risks %}
         <div class="mt-2 text-xs text-orange-700 bg-orange-50 p-2 rounded">
             <strong>Known risks:</strong> {{ proj.known_risks }}
         </div>
         {% endif %}
+        {% if proj.team %}
         <details class="mt-2">
             <summary class="text-xs text-gray-400 cursor-pointer">Team ({{ proj.team|length }})</summary>
             <ul class="text-xs text-gray-500 mt-1 space-y-0.5">
@@ -37,6 +92,7 @@
                 {% endfor %}
             </ul>
         </details>
+        {% endif %}
     </div>
     {% endfor %}
 </div>
@@ -130,4 +186,219 @@
         </div>
     </div>
 </div>
+
+<script>
+// Issue #45 — live dashboard polling.
+// Polls /api/projects/state every 3s while any job is queued/processing.
+// DOM updates use textContent + createElement (no innerHTML) to avoid XSS
+// from LLM-generated project names or field values.
+(function () {
+    const grid = document.getElementById('project-grid');
+    const liveRegion = document.getElementById('dashboard-live-region');
+    if (!grid) return;
+    const POLL_MS = 3000;
+    const HEALTH_LABELS = {
+        'critical': 'Critical — act now',
+        'warning':  'Attention needed',
+        'good':     'On track',
+        'unknown':  'Pending analysis'
+    };
+    const HEALTH_BORDER = {
+        'critical': 'border-red-500',
+        'warning':  'border-yellow-500',
+        'good':     'border-green-500',
+        'unknown':  'border-gray-300'
+    };
+    const HEALTH_PILL = {
+        'critical': ['bg-red-100', 'text-red-800'],
+        'warning':  ['bg-yellow-100', 'text-yellow-800'],
+        'good':     ['bg-green-100', 'text-green-800'],
+        'unknown':  ['bg-gray-100', 'text-gray-600']
+    };
+    const BORDER_CLASSES = Object.values(HEALTH_BORDER);
+    const PILL_CLASSES = Object.values(HEALTH_PILL).flat();
+    const SEV_ROWS = [
+        { key: 'critical_count', label: 'critical', cls: 'text-red-700' },
+        { key: 'high_count',     label: 'high',     cls: 'text-orange-700' },
+        { key: 'medium_count',   label: 'med',      cls: 'text-yellow-700' },
+        { key: 'low_count',      label: 'low',      cls: 'text-gray-600' },
+    ];
+
+    let pollTimer = null;
+    let polling = false;           // true while a fetch is in flight
+    let consecutiveFailures = 0;   // for exponential backoff on poll errors
+    const lastAnnouncedHealth = {};
+
+    function formatRelative(isoStr) {
+        if (!isoStr) return '';
+        const then = new Date(isoStr);
+        const diffMs = Date.now() - then.getTime();
+        const diffSec = Math.round(diffMs / 1000);
+        if (diffSec < 60) return 'Updated just now';
+        if (diffSec < 3600) return `Updated ${Math.round(diffSec / 60)}m ago`;
+        if (diffSec < 86400) return `Updated ${Math.round(diffSec / 3600)}h ago`;
+        return 'Updated ' + then.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    function renderCountsInto(countsEl, state) {
+        // Clear + rebuild via textContent / createElement — no innerHTML.
+        while (countsEl.firstChild) countsEl.removeChild(countsEl.firstChild);
+        const total = document.createElement('span');
+        total.className = 'flag-count-total font-medium';
+        total.textContent = `${state.flag_count || 0} flags`;
+        countsEl.appendChild(total);
+
+        const parts = SEV_ROWS.filter(r => state[r.key] > 0);
+        if (parts.length === 0) return;
+        const breakdown = document.createElement('span');
+        breakdown.className = 'flag-count-breakdown text-xs text-gray-500 ml-1';
+        parts.forEach((r, i) => {
+            if (i > 0) breakdown.appendChild(document.createTextNode(' · '));
+            const span = document.createElement('span');
+            span.className = r.cls;
+            span.textContent = `${state[r.key]} ${r.label}`;
+            breakdown.appendChild(span);
+        });
+        countsEl.appendChild(document.createTextNode(' '));
+        countsEl.appendChild(breakdown);
+    }
+
+    function updateCard(name, state, activeProject) {
+        const card = grid.querySelector(`[data-project-name="${CSS.escape(name)}"]`);
+        if (!card) return;
+
+        const health = state.health || 'unknown';
+
+        // Border color
+        BORDER_CLASSES.forEach(c => card.classList.remove(c));
+        card.classList.add(HEALTH_BORDER[health] || HEALTH_BORDER.unknown);
+
+        // Active flash
+        if (name === activeProject) {
+            card.classList.add('qbr-active-flash');
+        } else {
+            card.classList.remove('qbr-active-flash');
+        }
+
+        // Health pill
+        const pill = card.querySelector('.health-pill');
+        if (pill) {
+            PILL_CLASSES.forEach(c => pill.classList.remove(c));
+            (HEALTH_PILL[health] || HEALTH_PILL.unknown).forEach(c => pill.classList.add(c));
+            pill.textContent = HEALTH_LABELS[health] || HEALTH_LABELS.unknown;
+        }
+
+        // Flag counts
+        let countsEl = card.querySelector('.flag-counts');
+        if (health !== 'unknown') {
+            if (!countsEl) {
+                countsEl = document.createElement('div');
+                countsEl.className = 'flag-counts text-sm mb-1';
+                const pillRow = card.querySelector('.health-pill');
+                if (pillRow && pillRow.parentElement) {
+                    pillRow.parentElement.after(countsEl);
+                }
+            }
+            const fc = state.flag_count || 0;
+            const prevCount = parseInt(countsEl.dataset.flagCount || '0', 10);
+            countsEl.dataset.flagCount = String(fc);
+            renderCountsInto(countsEl, state);
+            if (fc > prevCount) {
+                countsEl.classList.add('qbr-just-updated');
+                setTimeout(() => countsEl.classList.remove('qbr-just-updated'), 650);
+            }
+        }
+
+        // Timestamp
+        if (state.last_updated) {
+            let tsEl = card.querySelector('.last-updated');
+            if (!tsEl) {
+                tsEl = document.createElement('p');
+                tsEl.className = 'last-updated text-xs text-gray-400 mb-1';
+                if (countsEl && countsEl.parentElement) countsEl.after(tsEl);
+            }
+            tsEl.dataset.iso = state.last_updated;
+            tsEl.title = state.last_updated;
+            tsEl.textContent = formatRelative(state.last_updated);
+        }
+
+        // Active badge — create or remove
+        const existingBadge = card.querySelector('.active-badge');
+        if (name === activeProject && !existingBadge) {
+            const badge = document.createElement('span');
+            badge.className = 'active-badge inline-block text-xs px-2 py-0.5 rounded bg-blue-100 text-blue-800 animate-pulse mt-1';
+            badge.textContent = 'Analysis in progress';
+            // Prefer placing after the counts block; fall back to the pill row
+            // if the project is still health='unknown' (no counts yet).
+            if (countsEl && countsEl.parentElement) {
+                countsEl.parentElement.insertBefore(badge, countsEl.nextSibling);
+            } else if (pill && pill.parentElement && pill.parentElement.parentElement) {
+                pill.parentElement.parentElement.insertBefore(badge, pill.parentElement.nextSibling);
+            }
+        } else if (name !== activeProject && existingBadge) {
+            existingBadge.remove();
+        }
+
+        // Accessibility announce on health transition
+        const prev = lastAnnouncedHealth[name];
+        if (prev !== undefined && prev !== health && health !== 'unknown') {
+            liveRegion.textContent = `${name} is now ${health} with ${state.flag_count || 0} flags.`;
+        }
+        lastAnnouncedHealth[name] = health;
+    }
+
+    async function poll() {
+        pollTimer = null;
+        polling = true;
+        try {
+            const resp = await fetch('/api/projects/state');
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            consecutiveFailures = 0;
+            grid.dataset.isRunning = data.is_running ? 'true' : 'false';
+            grid.dataset.activeProject = data.active_project || '';
+            Object.entries(data.projects).forEach(([name, state]) => {
+                updateCard(name, state, data.active_project);
+            });
+            if (data.is_running) {
+                pollTimer = setTimeout(poll, POLL_MS);
+            }
+        } catch (e) {
+            console.error('dashboard poll error:', e);
+            // Exponential backoff capped at 60s so a flapping backend does
+            // not amplify into a retry storm across many open tabs.
+            consecutiveFailures += 1;
+            const delay = Math.min(POLL_MS * 2 ** (consecutiveFailures - 1), 60_000);
+            pollTimer = setTimeout(poll, delay);
+        } finally {
+            polling = false;
+        }
+    }
+
+    function ensurePolling() {
+        // Guard on both pollTimer (scheduled next tick) and polling
+        // (in-flight fetch) so rapid visibility flips do not spawn
+        // duplicate poll chains.
+        if (pollTimer || polling) return;
+        poll();
+    }
+
+    // Refresh relative timestamps once on load (server renders 'Updated just
+    // now' as a placeholder); then every minute.
+    function refreshTimestamps() {
+        grid.querySelectorAll('.last-updated').forEach(el => {
+            if (el.dataset.iso) el.textContent = formatRelative(el.dataset.iso);
+        });
+    }
+    refreshTimestamps();
+    setInterval(refreshTimestamps, 60_000);
+
+    if (grid.dataset.isRunning === 'true') ensurePolling();
+
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) ensurePolling();
+    });
+    window.addEventListener('pageshow', ensurePolling);
+})();
+</script>
 {% endblock %}
