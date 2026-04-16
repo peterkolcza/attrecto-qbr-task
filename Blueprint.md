@@ -27,22 +27,83 @@ The current system ingests raw `.txt` email files from a directory. Each file re
 
 ### Scale-Out Architecture (Production)
 
+> **Current PoC state:** jobs stored in in-memory dict (web app), reports on local
+> filesystem. The architecture below is the target for production, NOT the current
+> implementation.
+
 ```mermaid
 graph LR
     A[Email Sources] -->|IMAP / Webhooks / API| B[Ingestion Service]
     B -->|Raw .eml| C[S3 / Object Storage]
     C -->|Event notification| D[SQS / Message Queue]
-    D -->|Worker pool| E[Parser Workers]
+    D -->|Worker pool<br/>autoscaling| E[Parser Workers]
     E -->|Structured threads| F[PostgreSQL]
-    F -->|Batch trigger| G[Analysis Pipeline]
-    G -->|Reports| H[Report Storage + API]
+    F -->|Priority queue| G[Analysis Queue<br/>Redis/SQS]
+    G -->|N agents parallel| H[LLM Agent Pool]
+    H -->|Cached results| I[Report Store]
+    I --> J[Web API / Dashboard]
 ```
 
-**Key scaling decisions:**
-- **Decouple ingestion from analysis** — email polling/webhooks run independently from LLM analysis
-- **Object storage for raw data** — immutable audit trail, no re-parsing needed
-- **Queue-driven workers** — horizontal scaling based on queue depth
-- **Incremental processing** — only analyze new/changed threads since last run, not the full corpus
+#### Storage migration (PoC → production)
+
+| Component | PoC | Production |
+|-----------|-----|-----------|
+| Raw emails | `.txt` files on disk | S3 object storage (immutable audit trail) |
+| Parsed threads | Parsed in-memory per run | PostgreSQL: `threads`, `messages`, `extracted_items`, `flags` tables |
+| Jobs / analysis runs | Python dict in memory (max 20) | PostgreSQL `jobs` table + Redis for active state |
+| Reports | Local `reports/*.md` + `*.json` | S3 + PostgreSQL metadata row |
+| Uploads | `/tmp/qbr_uploads/` | S3 pre-signed upload URLs |
+| Sessions | Signed cookie | Redis session store (stateless web tier) |
+
+#### Performance: making the pipeline fast
+
+Current single-machine Ollama run: ~30s per email × 18 emails = ~10 min sequential. At scale (1000+ emails/day), this doesn't fit in a business day. Optimization stack:
+
+1. **Parallel agents**: run N extraction workers concurrently (configurable via `QBR_WORKERS=8`). Each processes one email thread from the queue. With 8 workers on modest hardware: 1000 emails ≈ 1 hour instead of 8+.
+
+2. **Priority queues**: two queues — `high` (new client escalations, PM-flagged) and `normal` (weekly status updates). Workers consume `high` first. Keeps Director's critical flags near-real-time even under load.
+
+3. **Incremental processing**: only analyze threads that changed since last run (hash-based dedup on thread content). A weekly re-run skips 90%+ of unchanged threads.
+
+4. **Extraction result caching**: cache Stage A extraction by thread hash. If a thread adds one new message, only re-run extraction on the delta. Redis TTL keyed by `sha256(thread_content)`.
+
+5. **Model tiering under load**:
+   - **Critical queue** → Claude Sonnet 4.6 (best quality, ~$0.40/run)
+   - **Normal queue** → Claude Haiku 4.5 (cheap, ~$0.04/run)
+   - **Bulk historical** → Ollama local (zero marginal cost, slower)
+   Routing by queue, not per-email — keeps the decision simple.
+
+6. **Anthropic Batch API** for non-urgent analyses (50% cost discount, 24h SLA). Pair with prompt caching → ~95% cost reduction vs naive calls.
+
+7. **Off-hours batch processing**: if daytime volume exceeds capacity, overflow jobs get queued with `run_after: <next_off_peak>` timestamp. Cron kicks off a "night run" at 02:00 to clear backlog.
+
+#### Autoscaling strategy
+
+```
+if queue_depth > 100:    scale_workers_to(N*2, max=32)
+if queue_depth < 10:     scale_workers_to(N/2, min=2)
+if p95_latency > 60s:    scale_workers_to(N+1)
+```
+
+On Kubernetes: HPA based on queue depth metric from Prometheus. On a single-VM deploy (Oracle VPS target): fixed pool of 4-8 workers with `systemd` instances.
+
+#### Resilience patterns
+
+- **Dead letter queue**: jobs that fail 3 retries → DLQ with full prompt + response for forensic review (not lost)
+- **Circuit breaker**: if Anthropic API error rate > 20% over 5 min → flip to Ollama fallback automatically, alert Director
+- **Graceful degradation**: if LLM unavailable for synthesis → serve last-known-good report with "stale" banner
+- **Idempotency keys**: retries of the same job produce the same output (hash of input → report ID)
+
+#### What the current PoC demonstrates
+
+Even though the PoC is single-machine + in-memory, the code is **already structured for scale-out**:
+- `LLMClient` abstraction → swap to a pooled/async client trivially
+- `run_pipeline_for_thread` is stateless → trivially parallelizable
+- Jobs carry `source` field → ready for queue routing
+- Structured output (Pydantic) → drops straight into SQL tables
+- Provenance chain → survives serialization, auditable across workers
+
+The production migration is mostly **wiring**, not rewriting.
 
 ---
 
