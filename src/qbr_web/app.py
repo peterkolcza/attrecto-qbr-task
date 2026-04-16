@@ -50,11 +50,7 @@ async def auth_middleware(request: Request, call_next):
     In Starlette, middleware added later is wrapped INSIDE earlier ones,
     so auth_middleware runs AFTER SessionMiddleware populates request.session.
     """
-    if (
-        auth_enabled()
-        and not is_public_path(request.url.path)
-        and not request.session.get("user")
-    ):
+    if auth_enabled() and not is_public_path(request.url.path) and not request.session.get("user"):
         next_url = request.url.path
         return RedirectResponse(url=f"/login?next={next_url}", status_code=303)
     return await call_next(request)
@@ -119,6 +115,78 @@ SAMPLE_DATA_DIR = Path(__file__).parent.parent.parent / "task" / "sample_data"
 # In-memory job store (evicts oldest when exceeding MAX_JOBS)
 MAX_JOBS = 20
 jobs: dict[str, dict[str, Any]] = {}
+
+# In-memory live project health state — overlays seed data on the dashboard.
+# Keyed by project name. Not persisted across server restart (matches jobs dict).
+project_state: dict[str, dict[str, Any]] = {}
+
+
+def _health_from_flags(flags: list[Any]) -> str:
+    """Map a list of AttentionFlag (or dicts) to a health label.
+
+    Rule:
+    - any flag with severity=critical  → 'critical'
+    - any flag with any other severity → 'warning'
+    - empty flag list                  → 'good'
+    """
+    if not flags:
+        return "good"
+    for f in flags:
+        sev = f.severity if hasattr(f, "severity") else f.get("severity")
+        sev_str = str(sev)
+        if sev_str == "critical" or sev_str.endswith(".CRITICAL"):
+            return "critical"
+    return "warning"
+
+
+def _count_by_severity(flags: list[Any]) -> dict[str, int]:
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for f in flags:
+        sev = f.severity if hasattr(f, "severity") else f.get("severity")
+        sev_str = str(sev).split(".")[-1].lower()
+        if sev_str in counts:
+            counts[sev_str] += 1
+    return counts
+
+
+def _finalize_project_state(flags_by_project: dict[str, list[Any]], job_id: str) -> None:
+    """Write final state for every project that produced flags.
+
+    Called at end of run after aggregate_flags_by_project. Merges with whatever
+    Unit 2's per-thread classification already accumulated — does not clobber
+    incremental progress if higher.
+    """
+    from qbr.models import AttentionFlag
+
+    now_iso = datetime.now(UTC).isoformat()
+    for project_name, flags in flags_by_project.items():
+        serialized = [
+            f.model_dump(mode="json") if isinstance(f, AttentionFlag) else f for f in flags
+        ]
+        final_counts = _count_by_severity(flags)
+        final_count = len(flags)
+
+        existing = project_state.get(project_name, {})
+        existing_count = existing.get("flag_count", 0)
+        if existing_count > final_count:
+            logger.warning(
+                "project_state[%s] incremental count %d > final %d; keeping higher",
+                project_name,
+                existing_count,
+                final_count,
+            )
+
+        project_state[project_name] = {
+            "health": _health_from_flags(flags),
+            "flag_count": max(final_count, existing_count),
+            "critical_count": final_counts["critical"],
+            "high_count": final_counts["high"],
+            "medium_count": final_counts["medium"],
+            "low_count": final_counts["low"],
+            "flags": serialized,
+            "last_updated": now_iso,
+            "latest_job_id": job_id,
+        }
 
 
 def _evict_old_jobs() -> None:
@@ -323,6 +391,10 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
         flags_by_project = await asyncio.to_thread(aggregate_flags_by_project, all_items)
         total_flags = sum(len(f) for f in flags_by_project.values())
         _log_progress(job, f"{total_flags} flags triggered")
+
+        # Populate live dashboard state so cards reflect the new run even if
+        # report generation fails downstream.
+        _finalize_project_state(flags_by_project, job_id)
 
         # Step 4: Generate report
         _log_progress(job, f"Generating report ({synthesis_model})...")

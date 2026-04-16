@@ -15,12 +15,14 @@ def client():
 
 @pytest.fixture(autouse=True)
 def clear_jobs():
-    """Clear the in-memory job store before each test for isolation."""
-    from qbr_web.app import jobs
+    """Clear the in-memory job and project state stores before each test for isolation."""
+    from qbr_web.app import jobs, project_state
 
     jobs.clear()
+    project_state.clear()
     yield
     jobs.clear()
+    project_state.clear()
 
 
 class TestHealthcheck:
@@ -92,3 +94,104 @@ class TestSSEStream:
     """SSE streams can't be tested with sync TestClient — verified manually."""
 
     pass
+
+
+class TestProjectStateFinalize:
+    """Unit 1: _finalize_project_state populates the live dashboard store."""
+
+    def _make_flag(self, severity, title="t", project="P", status="open"):
+        from datetime import UTC, datetime
+
+        from qbr.models import (
+            AttentionFlag,
+            FlagStatus,
+            FlagType,
+            Severity,
+            SourceAttribution,
+        )
+
+        sev_map = {
+            "critical": Severity.CRITICAL,
+            "high": Severity.HIGH,
+            "medium": Severity.MEDIUM,
+            "low": Severity.LOW,
+        }
+        status_map = {
+            "open": FlagStatus.OPEN,
+            "needs_review": FlagStatus.NEEDS_REVIEW,
+            "resolved": FlagStatus.RESOLVED,
+        }
+        return AttentionFlag(
+            flag_type=FlagType.UNRESOLVED_ACTION,
+            title=title,
+            severity=sev_map[severity],
+            project=project,
+            sources=[
+                SourceAttribution(
+                    person="Alice",
+                    email="alice@example.com",
+                    timestamp=datetime.now(UTC),
+                    source_ref="email1.txt",
+                    quoted_text="test quote",
+                )
+            ],
+            status=status_map[status],
+        )
+
+    def test_finalize_sets_critical_health(self):
+        from qbr_web.app import _finalize_project_state, project_state
+
+        flags = [self._make_flag("critical"), self._make_flag("high")]
+        _finalize_project_state({"Project Phoenix": flags}, job_id="job1")
+
+        entry = project_state["Project Phoenix"]
+        assert entry["health"] == "critical"
+        assert entry["flag_count"] == 2
+        assert entry["critical_count"] == 1
+        assert entry["high_count"] == 1
+        assert entry["last_updated"]  # non-empty ISO string
+        assert entry["latest_job_id"] == "job1"
+        assert isinstance(entry["flags"], list)
+        assert len(entry["flags"]) == 2
+        # Flags are JSON-safe dicts (no datetime objects)
+        import json
+
+        json.dumps(entry["flags"])  # must not raise
+
+    def test_finalize_medium_only_is_warning_not_good(self):
+        """medium/low severity must NOT collapse into 'good' — masks signal."""
+        from qbr_web.app import _finalize_project_state, project_state
+
+        flags = [self._make_flag("medium"), self._make_flag("low")]
+        _finalize_project_state({"Project Omicron": flags}, job_id="job2")
+
+        assert project_state["Project Omicron"]["health"] == "warning"
+
+    def test_finalize_empty_flag_list_is_good(self):
+        from qbr_web.app import _finalize_project_state, project_state
+
+        _finalize_project_state({"DivatKirály": []}, job_id="job3")
+
+        entry = project_state["DivatKirály"]
+        assert entry["health"] == "good"
+        assert entry["flag_count"] == 0
+        assert entry["critical_count"] == 0
+
+    def test_finalize_does_not_overwrite_unprocessed_projects(self):
+        """Projects not in flags_by_project should not appear in state."""
+        from qbr_web.app import _finalize_project_state, project_state
+
+        _finalize_project_state({"Project Phoenix": []}, job_id="job4")
+        assert "Project Phoenix" in project_state
+        assert "Project Omicron" not in project_state
+        assert "DivatKirály" not in project_state
+
+    def test_finalize_preserves_higher_incremental_count(self):
+        """If Unit 2's incremental count is higher (defensive), keep the higher."""
+        from qbr_web.app import _finalize_project_state, project_state
+
+        # Simulate incremental state from Unit 2
+        project_state["Project Phoenix"] = {"flag_count": 5}
+
+        _finalize_project_state({"Project Phoenix": [self._make_flag("high")]}, job_id="job5")
+        assert project_state["Project Phoenix"]["flag_count"] == 5  # kept higher
