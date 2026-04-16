@@ -303,13 +303,28 @@ def _evict_old_jobs() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    payload = _build_projects_state_payload()
+    # Merge seed metadata (PM, team, q3_focus) with live state per project.
+    seed_projects = get_demo_projects()
+    seed_by_name = {p["name"]: p for p in seed_projects}
+    projects_view = []
+    for name, live in payload["projects"].items():
+        base = seed_by_name.get(name, {"name": name, "team": [], "team_size": 0})
+        merged = {**base, **live, "name": name}  # live overrides health
+        projects_view.append(merged)
+    # Preserve seed order for seed projects; uploaded-only projects follow.
+    seed_order = {p["name"]: i for i, p in enumerate(seed_projects)}
+    projects_view.sort(key=lambda p: seed_order.get(p["name"], 999))
+
     return templates.TemplateResponse(
         request,
         "index.html",
         context={
             "jobs": list(jobs.items()),
             "has_sample_data": SAMPLE_DATA_DIR.exists(),
-            "projects": get_demo_projects(),
+            "projects": projects_view,
+            "is_running": payload["is_running"],
+            "active_project": payload["active_project"],
         },
     )
 

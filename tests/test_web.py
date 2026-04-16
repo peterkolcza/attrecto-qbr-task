@@ -381,3 +381,164 @@ class TestProjectsStateEndpoint:
         resp = client.get("/api/projects/state")
         data = resp.json()
         assert "Custom Uploaded Project" in data["projects"]
+
+
+class TestDashboardLiveRender:
+    """Unit 4: server-rendered dashboard reflects live project_state on first paint."""
+
+    def _make_flag(self, severity, project):
+        from datetime import UTC, datetime
+
+        from qbr.models import (
+            AttentionFlag,
+            FlagStatus,
+            FlagType,
+            Severity,
+            SourceAttribution,
+        )
+
+        sev_map = {
+            "critical": Severity.CRITICAL,
+            "high": Severity.HIGH,
+            "medium": Severity.MEDIUM,
+            "low": Severity.LOW,
+        }
+        return AttentionFlag(
+            flag_type=FlagType.UNRESOLVED_ACTION,
+            title="t",
+            severity=sev_map[severity],
+            project=project,
+            sources=[
+                SourceAttribution(
+                    person="A",
+                    email="a@x.com",
+                    timestamp=datetime.now(UTC),
+                )
+            ],
+            status=FlagStatus.OPEN,
+        )
+
+    def test_empty_state_shows_pending_analysis(self, client):
+        """Before any run: all seed cards show 'Pending analysis'."""
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert resp.text.count("Pending analysis") >= 3  # three seed cards
+
+    def test_grid_has_is_running_data_attribute(self, client):
+        resp = client.get("/")
+        assert 'data-is-running="false"' in resp.text
+        assert 'id="project-grid"' in resp.text
+
+    def test_cards_have_project_name_attribute(self, client):
+        resp = client.get("/")
+        assert 'data-project-name="Project Phoenix"' in resp.text
+        assert 'data-project-name="Project Omicron"' in resp.text
+        assert 'data-project-name="DivatKir' in resp.text  # partial match handles encoding
+
+    def test_critical_project_renders_with_health_label(self, client):
+        from qbr_web.app import _finalize_project_state
+
+        _finalize_project_state(
+            {"Project Phoenix": [self._make_flag("critical", "Project Phoenix")]}, "j1"
+        )
+        resp = client.get("/")
+        assert "Critical — act now" in resp.text
+        assert "1 flags" in resp.text
+        assert "1 critical" in resp.text
+
+    def test_warning_not_good_for_medium_flags(self, client):
+        from qbr_web.app import _finalize_project_state
+
+        _finalize_project_state(
+            {"Project Omicron": [self._make_flag("medium", "Project Omicron")]}, "j2"
+        )
+        resp = client.get("/")
+        assert "Attention needed" in resp.text  # warning label
+        # Should NOT be labeled "On track" for this project
+        # (Other projects still show Pending analysis, which is fine)
+
+    def test_running_state_renders_data_is_running_true(self, client):
+        from qbr_web.app import jobs
+
+        jobs["j1"] = {
+            "id": "j1",
+            "source": "demo",
+            "state": "processing",
+            "progress": [],
+            "result": None,
+            "error": None,
+            "created_at": "2026-04-16T00:00:00+00:00",
+            "active_project": "Project Phoenix",
+        }
+        try:
+            resp = client.get("/")
+            assert 'data-is-running="true"' in resp.text
+            assert 'data-active-project="Project Phoenix"' in resp.text
+            # Active badge rendered on matching card
+            assert "Analysis in progress" in resp.text
+        finally:
+            del jobs["j1"]
+
+    def test_flash_class_on_active_card_only(self, client):
+        import re
+
+        from qbr_web.app import jobs
+
+        jobs["j1"] = {
+            "id": "j1",
+            "source": "demo",
+            "state": "processing",
+            "progress": [],
+            "result": None,
+            "error": None,
+            "created_at": "2026-04-16T00:00:00+00:00",
+            "active_project": "Project Phoenix",
+        }
+        try:
+            resp = client.get("/")
+            # Count only `.project-card` elements with the flash class applied.
+            cards_with_flash = re.findall(
+                r'<div class="project-card[^"]*qbr-active-flash[^"]*"[^>]*data-project-name="([^"]+)"',
+                resp.text,
+            )
+            assert cards_with_flash == ["Project Phoenix"]
+        finally:
+            del jobs["j1"]
+
+    def test_drill_down_link_url_encoded(self, client):
+        """Project names with non-ASCII chars are URL-encoded in links."""
+        resp = client.get("/")
+        # DivatKirály → DivatKir%C3%A1ly (UTF-8 encoded)
+        assert "/projects/DivatKir%C3%A1ly" in resp.text
+
+    def test_aria_live_region_present(self, client):
+        resp = client.get("/")
+        assert 'id="dashboard-live-region"' in resp.text
+        assert 'aria-live="polite"' in resp.text
+
+    def test_details_not_nested_inside_anchor(self, client):
+        """<details> must live OUTSIDE the drill-down <a> to remain interactive."""
+        import re
+
+        resp = client.get("/")
+        # Find the first project card block
+        card_match = re.search(
+            r'data-project-name="Project Phoenix"(.*?)(?=data-project-name=|</main>)',
+            resp.text,
+            re.DOTALL,
+        )
+        assert card_match is not None
+        card_html = card_match.group(1)
+
+        # Anchor opens at `<a href="/projects/...` and closes at the first `</a>`.
+        anchor_open = card_html.find('<a href="/projects/')
+        assert anchor_open >= 0
+        anchor_close = card_html.find("</a>", anchor_open)
+        assert anchor_close >= 0
+
+        # <details> (if present) must be AFTER the anchor's </a>.
+        details_pos = card_html.find("<details", anchor_open)
+        if details_pos >= 0:
+            assert details_pos > anchor_close, (
+                "<details> must not be nested inside the card's drill-down <a>"
+            )
