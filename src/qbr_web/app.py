@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -20,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from qbr.flags import aggregate_flags_by_project
+from qbr.flags import aggregate_flags_by_project, classify_flags
 from qbr.llm import UsageTracker, create_hybrid_clients
 from qbr.models import ExtractedItem  # noqa: TC001
 from qbr.parser import parse_all_emails
@@ -149,6 +150,63 @@ def _count_by_severity(flags: list[Any]) -> dict[str, int]:
     return counts
 
 
+def _merge_incremental_flags(project: str, new_flags: list[Any], job_id: str) -> None:
+    """Merge per-thread flags into project_state as extraction progresses (R6).
+
+    Called during the per-thread loop in _run_analysis so dashboard flag counts
+    rise incrementally. _finalize_project_state still runs at end of job to
+    apply cross-project conflict detection and replace the final counts.
+    """
+    from qbr.models import AttentionFlag
+
+    if not new_flags:
+        # Ensure the project appears in state even before first flag lands
+        # (so dashboard can show active flash + 0 flags).
+        project_state.setdefault(
+            project,
+            {
+                "health": "good",
+                "flag_count": 0,
+                "critical_count": 0,
+                "high_count": 0,
+                "medium_count": 0,
+                "low_count": 0,
+                "flags": [],
+                "last_updated": datetime.now(UTC).isoformat(),
+                "latest_job_id": job_id,
+            },
+        )
+        return
+
+    serialized_new = [
+        f.model_dump(mode="json") if isinstance(f, AttentionFlag) else f for f in new_flags
+    ]
+    entry = project_state.setdefault(
+        project,
+        {
+            "health": "good",
+            "flag_count": 0,
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "low_count": 0,
+            "flags": [],
+            "last_updated": datetime.now(UTC).isoformat(),
+            "latest_job_id": job_id,
+        },
+    )
+    entry["flags"].extend(serialized_new)
+    entry["flag_count"] = len(entry["flags"])
+    counts = _count_by_severity(entry["flags"])
+    entry["critical_count"] = counts["critical"]
+    entry["high_count"] = counts["high"]
+    entry["medium_count"] = counts["medium"]
+    entry["low_count"] = counts["low"]
+    entry["health"] = _health_from_flags(entry["flags"])
+    entry["last_updated"] = datetime.now(UTC).isoformat()
+    entry["latest_job_id"] = job_id
+
+
 def _finalize_project_state(flags_by_project: dict[str, list[Any]], job_id: str) -> None:
     """Write final state for every project that produced flags.
 
@@ -246,6 +304,7 @@ async def start_analysis(request: Request, files: list[UploadFile] | None = None
         "result": None,
         "error": None,
         "created_at": datetime.now(UTC).isoformat(),
+        "active_project": None,
     }
 
     # Determine input source
@@ -322,6 +381,7 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
 
         # Step 2: Extract per thread
         all_items: dict[str, list[ExtractedItem]] = defaultdict(list)
+        ACTIVE_PROJECT_MIN_HOLD_S = 1.5
         for i, thread in enumerate(threads):
             if not thread.messages:
                 continue
@@ -329,6 +389,9 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
             # Detailed per-email header
             first_msg = thread.messages[0]
             off_topic_count = sum(1 for m in thread.messages if m.is_off_topic)
+            project_for_flash = thread.project or "Unknown"
+            job["active_project"] = project_for_flash
+            t_start = time.monotonic()
             _log_progress(
                 job, f'[{i + 1}/{len(threads)}] {thread.source_file} — "{thread.subject[:80]}"'
             )
@@ -350,6 +413,12 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
                 )
                 project = thread.project or "Unknown"
                 all_items[project].extend(items)
+
+                # Unit 2: classify this thread's flags immediately so dashboard
+                # counts rise incrementally (R6). detect_conflicts is NOT run
+                # per-thread — it needs the full item list, runs at end of job.
+                per_thread_flags = await asyncio.to_thread(classify_flags, items, project)
+                _merge_incremental_flags(project, per_thread_flags, job_id)
 
                 # Stage A summary
                 by_type = metrics["items_by_type"]
@@ -382,6 +451,16 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
                 )
             except Exception as e:
                 _log_progress(job, f"  ⚠ Error: {e}")
+
+            # Unit 2: hold active_project for at least ACTIVE_PROJECT_MIN_HOLD_S
+            # so short threads are still visible to a 3s poll, then clear.
+            elapsed = time.monotonic() - t_start
+            if elapsed < ACTIVE_PROJECT_MIN_HOLD_S:
+                await asyncio.sleep(ACTIVE_PROJECT_MIN_HOLD_S - elapsed)
+            job["active_project"] = None
+
+        # Defensive: unconditionally clear before classification/report generation.
+        job["active_project"] = None
 
         total_items = sum(len(v) for v in all_items.values())
         _log_progress(job, f"Extraction complete: {total_items} items total")
@@ -416,6 +495,7 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
     except Exception as e:
         job["state"] = "error"
         job["error"] = "Analysis failed. Check server logs for details."
+        job["active_project"] = None  # clear flash on fatal error
         _log_progress(job, "Error: analysis failed")
         logger.exception("Analysis failed for job %s: %s", job_id, e)
     finally:

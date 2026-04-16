@@ -195,3 +195,86 @@ class TestProjectStateFinalize:
 
         _finalize_project_state({"Project Phoenix": [self._make_flag("high")]}, job_id="job5")
         assert project_state["Project Phoenix"]["flag_count"] == 5  # kept higher
+
+
+class TestIncrementalFlagMerge:
+    """Unit 2: _merge_incremental_flags writes as threads are classified."""
+
+    def _make_flag(self, severity, title="t", project="P"):
+        from datetime import UTC, datetime
+
+        from qbr.models import (
+            AttentionFlag,
+            FlagStatus,
+            FlagType,
+            Severity,
+            SourceAttribution,
+        )
+
+        sev_map = {
+            "critical": Severity.CRITICAL,
+            "high": Severity.HIGH,
+            "medium": Severity.MEDIUM,
+            "low": Severity.LOW,
+        }
+        return AttentionFlag(
+            flag_type=FlagType.UNRESOLVED_ACTION,
+            title=title,
+            severity=sev_map[severity],
+            project=project,
+            sources=[
+                SourceAttribution(
+                    person="Bob",
+                    email="bob@example.com",
+                    timestamp=datetime.now(UTC),
+                    source_ref="email2.txt",
+                )
+            ],
+            status=FlagStatus.OPEN,
+        )
+
+    def test_merge_from_scratch_sets_counts(self):
+        from qbr_web.app import _merge_incremental_flags, project_state
+
+        flags = [self._make_flag("critical"), self._make_flag("high")]
+        _merge_incremental_flags("Project Phoenix", flags, job_id="j1")
+
+        entry = project_state["Project Phoenix"]
+        assert entry["flag_count"] == 2
+        assert entry["critical_count"] == 1
+        assert entry["high_count"] == 1
+        assert entry["health"] == "critical"
+        assert entry["latest_job_id"] == "j1"
+
+    def test_merge_accumulates_across_threads(self):
+        from qbr_web.app import _merge_incremental_flags, project_state
+
+        _merge_incremental_flags("Project Phoenix", [self._make_flag("medium")], "j1")
+        _merge_incremental_flags("Project Phoenix", [self._make_flag("high")], "j1")
+
+        entry = project_state["Project Phoenix"]
+        assert entry["flag_count"] == 2
+        assert entry["medium_count"] == 1
+        assert entry["high_count"] == 1
+        assert entry["health"] == "warning"
+
+    def test_merge_empty_flags_still_registers_project(self):
+        """So the dashboard can show an 'active' flash even before first flag."""
+        from qbr_web.app import _merge_incremental_flags, project_state
+
+        _merge_incremental_flags("DivatKirály", [], job_id="j2")
+
+        assert "DivatKirály" in project_state
+        assert project_state["DivatKirály"]["flag_count"] == 0
+        assert project_state["DivatKirály"]["health"] == "good"
+
+    def test_job_dict_has_active_project_key(self, client):
+        """Creating a job initializes active_project=None for the dashboard."""
+        from qbr_web.app import jobs
+
+        client.post("/analyze", follow_redirects=False)
+        assert len(jobs) == 1
+        job = next(iter(jobs.values()))
+        assert "active_project" in job
+        # Starts None, but may have flipped by now since the pipeline runs async.
+        # The key's presence is what matters for the dashboard contract.
