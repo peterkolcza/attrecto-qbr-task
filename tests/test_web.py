@@ -542,3 +542,134 @@ class TestDashboardLiveRender:
             assert details_pos > anchor_close, (
                 "<details> must not be nested inside the card's drill-down <a>"
             )
+
+
+class TestProjectDrilldown:
+    """Unit 5: GET /projects/{name} drill-down page."""
+
+    def _make_flag(self, severity, project, status="open", title="flag"):
+        from datetime import UTC, datetime
+
+        from qbr.models import (
+            AttentionFlag,
+            FlagStatus,
+            FlagType,
+            Severity,
+            SourceAttribution,
+        )
+
+        sev_map = {
+            "critical": Severity.CRITICAL,
+            "high": Severity.HIGH,
+            "medium": Severity.MEDIUM,
+            "low": Severity.LOW,
+        }
+        st_map = {
+            "open": FlagStatus.OPEN,
+            "needs_review": FlagStatus.NEEDS_REVIEW,
+            "resolved": FlagStatus.RESOLVED,
+        }
+        return AttentionFlag(
+            flag_type=FlagType.UNRESOLVED_ACTION,
+            title=title,
+            severity=sev_map[severity],
+            project=project,
+            sources=[
+                SourceAttribution(
+                    person="Alice",
+                    email="alice@x.com",
+                    timestamp=datetime.now(UTC),
+                    source_ref="email1.txt",
+                )
+            ],
+            status=st_map[status],
+            evidence_summary='"Payment gateway broken" — Alice (email1.txt)',
+            age_days=5,
+        )
+
+    def test_seed_project_never_analyzed_shows_empty_state(self, client):
+        resp = client.get("/projects/Project Phoenix")
+        assert resp.status_code == 200
+        assert "No analysis yet for Project Phoenix" in resp.text
+        assert "Run Analysis" in resp.text
+
+    def test_analyzed_project_with_flags_lists_them(self, client):
+        from qbr_web.app import _finalize_project_state
+
+        _finalize_project_state(
+            {
+                "Project Phoenix": [
+                    self._make_flag("critical", "Project Phoenix", "open", "Flag A"),
+                    self._make_flag("high", "Project Phoenix", "needs_review", "Flag B"),
+                ]
+            },
+            job_id="jX",
+        )
+        resp = client.get("/projects/Project Phoenix")
+        assert resp.status_code == 200
+        assert "Flag A" in resp.text
+        assert "Flag B" in resp.text
+        assert "Payment gateway broken" in resp.text  # evidence_summary
+        assert "Critical — act now" in resp.text  # health label
+        # Canonical status-count order
+        assert "1 open" in resp.text
+        assert "1 needs review" in resp.text
+        assert "0 resolved" in resp.text
+
+    def test_analyzed_project_zero_flags_shows_all_clear(self, client):
+        from qbr_web.app import _finalize_project_state
+
+        _finalize_project_state({"Project Phoenix": []}, job_id="jY")
+        resp = client.get("/projects/Project Phoenix")
+        assert resp.status_code == 200
+        assert "All clear" in resp.text
+        # No flag items rendered
+        assert "Attention Flags</h2>" not in resp.text
+
+    def test_unknown_project_returns_404(self, client):
+        resp = client.get("/projects/NoSuchProject")
+        assert resp.status_code == 404
+
+    def test_non_ascii_project_name_round_trip(self, client):
+        # Seed project name "DivatKirály" with URL-encoded UTF-8
+        resp = client.get("/projects/DivatKir%C3%A1ly")
+        assert resp.status_code == 200
+        assert "DivatKirály" in resp.text
+
+    def test_evicted_job_renders_disabled_report_link(self, client):
+        from qbr_web.app import _finalize_project_state
+
+        _finalize_project_state(
+            {"Project Phoenix": [self._make_flag("high", "Project Phoenix")]},
+            job_id="evicted_job_id",  # job not in jobs dict
+        )
+        resp = client.get("/projects/Project Phoenix")
+        assert resp.status_code == 200
+        assert "Report no longer available" in resp.text
+        # The disabled report link must NOT include a clickable URL
+        assert 'href="/jobs/evicted_job_id/report"' not in resp.text
+
+    def test_completed_job_renders_active_report_link(self, client):
+        from qbr_web.app import _finalize_project_state, jobs
+
+        jobs["live_job"] = {
+            "id": "live_job",
+            "source": "demo",
+            "state": "complete",
+            "progress": [],
+            "result": {"usage": {}},
+            "error": None,
+            "created_at": "2026-04-16T00:00:00+00:00",
+            "active_project": None,
+        }
+        _finalize_project_state(
+            {"Project Phoenix": [self._make_flag("high", "Project Phoenix")]},
+            job_id="live_job",
+        )
+        try:
+            resp = client.get("/projects/Project Phoenix")
+            assert resp.status_code == 200
+            assert 'href="/jobs/live_job/report"' in resp.text
+            assert "View full report" in resp.text
+        finally:
+            del jobs["live_job"]

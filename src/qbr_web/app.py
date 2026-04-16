@@ -645,6 +645,78 @@ async def job_stream(job_id: str):
     return EventSourceResponse(event_generator())
 
 
+@app.get("/projects/{name}", response_class=HTMLResponse)
+async def project_detail(request: Request, name: str):
+    """Drill-down page showing all flags for a single project."""
+    seed_names = {p["name"]: p for p in get_demo_projects()}
+    state = project_state.get(name)
+    seed = seed_names.get(name)
+
+    # 404 when the name is neither in seed nor in state (forgiving 200
+    # would let the URL namespace be infinite).
+    if seed is None and state is None:
+        return HTMLResponse("<h1>Project not found</h1>", status_code=404)
+
+    # Empty state #1: seed project, never analyzed
+    if state is None:
+        return templates.TemplateResponse(
+            request,
+            "project_detail.html",
+            context={
+                "name": name,
+                "seed": seed or {},
+                "state": None,
+                "empty_state": "never_analyzed",
+                "report_link": None,
+                "status_counts": None,
+            },
+        )
+
+    # Compute status counts from stored flags
+    flags = state.get("flags", [])
+    status_counts = {"open": 0, "needs_review": 0, "resolved": 0}
+    for f in flags:
+        st = f.get("status", "open")
+        if st in status_counts:
+            status_counts[st] += 1
+
+    # Report link: usable only when the originating job is still in memory
+    latest_job_id = state.get("latest_job_id")
+    job = jobs.get(latest_job_id) if latest_job_id else None
+    if job and job.get("state") == "complete":
+        report_link = {"url": f"/jobs/{latest_job_id}/report", "available": True}
+    else:
+        report_link = {"url": None, "available": False}
+
+    # Empty state #2: analyzed but zero flags
+    if state.get("flag_count", 0) == 0:
+        return templates.TemplateResponse(
+            request,
+            "project_detail.html",
+            context={
+                "name": name,
+                "seed": seed or {},
+                "state": state,
+                "empty_state": "all_clear",
+                "report_link": report_link,
+                "status_counts": status_counts,
+            },
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "project_detail.html",
+        context={
+            "name": name,
+            "seed": seed or {},
+            "state": state,
+            "empty_state": None,
+            "report_link": report_link,
+            "status_counts": status_counts,
+        },
+    )
+
+
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 async def job_detail(request: Request, job_id: str):
     job = jobs.get(job_id)
