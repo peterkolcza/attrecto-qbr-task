@@ -64,6 +64,37 @@
                 <li>Generate Portfolio Health Report</li>
             </ol>
         </div>
+
+        <!-- Wait info (shown after 3s) -->
+        <div id="wait-info" class="mt-6 p-3 bg-cyan-50 border border-cyan-200 rounded text-sm text-cyan-900 opacity-0 transition-opacity duration-500 hidden">
+            <p class="font-medium mb-1">⏱ Heads up</p>
+            <p>Email processing can take up to <strong>10 minutes</strong>. You can go back to the
+            <a href="/" class="underline">dashboard</a> and check progress later, or play a bit while you wait.</p>
+        </div>
+
+        <!-- Tetris game (shown after 8s = 3s info + 5s read time) -->
+        <div id="tetris-container" class="mt-4 opacity-0 transition-opacity duration-700 hidden">
+            <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                    <canvas id="tetris-canvas" width="200" height="400" class="border-2 border-gray-700 rounded bg-gray-900"></canvas>
+                    <p class="text-xs text-gray-500 mt-1">← → ↓ move · ↑ rotate · Space drop</p>
+                </div>
+                <div class="flex-1 text-sm space-y-3">
+                    <div>
+                        <p class="text-gray-500 text-xs mb-1">Next</p>
+                        <canvas id="tetris-next" width="80" height="80" class="border border-gray-700 rounded bg-gray-900"></canvas>
+                    </div>
+                    <div class="text-gray-700">
+                        <p>Score: <span id="tetris-score" class="font-mono font-bold">0</span></p>
+                        <p>Lines: <span id="tetris-lines" class="font-mono font-bold">0</span></p>
+                    </div>
+                    <div id="tetris-gameover" class="hidden text-red-600 text-xs">
+                        <p class="font-medium">Game Over</p>
+                        <button onclick="window.__tetrisRestart()" class="mt-1 px-2 py-1 bg-cyan-600 text-white rounded text-xs hover:bg-cyan-700">Restart</button>
+                    </div>
+                </div>
+            </div>
+        </div>
         {% endif %}
     </div>
 </div>
@@ -73,8 +104,50 @@
 </div>
 
 {% if job.state in ('processing', 'queued') %}
+<script src="/static/tetris.js"></script>
 <script>
-// Auto-refresh: poll the job page every 5 seconds until done
+// Tetris reveal timeline: 3s → info message, 8s → game
+(function() {
+    const info = document.getElementById('wait-info');
+    const container = document.getElementById('tetris-container');
+    const canvas = document.getElementById('tetris-canvas');
+    const nextCanvas = document.getElementById('tetris-next');
+    const scoreEl = document.getElementById('tetris-score');
+    const linesEl = document.getElementById('tetris-lines');
+    const gameOverEl = document.getElementById('tetris-gameover');
+
+    function startGame() {
+        if (gameOverEl) gameOverEl.classList.add('hidden');
+        window.QBRTetris.start(canvas, nextCanvas, scoreEl, linesEl, (score, lines) => {
+            if (gameOverEl) gameOverEl.classList.remove('hidden');
+        });
+    }
+    window.__tetrisRestart = startGame;
+
+    // 3s: show info message
+    setTimeout(() => {
+        if (!info) return;
+        info.classList.remove('hidden');
+        requestAnimationFrame(() => info.classList.replace('opacity-0', 'opacity-100'));
+    }, 3000);
+
+    // 8s: show game + start
+    setTimeout(() => {
+        if (!container) return;
+        container.classList.remove('hidden');
+        requestAnimationFrame(() => container.classList.replace('opacity-0', 'opacity-100'));
+        startGame();
+    }, 8000);
+
+    // Stop game when job completes
+    window.__stopTetris = function() {
+        if (window.QBRTetris) window.QBRTetris.stop();
+        if (container) container.classList.add('hidden');
+        if (info) info.classList.add('hidden');
+    };
+})();
+
+// Auto-refresh: poll the job page every 3 seconds until done
 (function() {
     const logContainer = document.getElementById('log-container');
     const resultPanel = document.getElementById('result-panel');
@@ -94,6 +167,7 @@
 
             // Check if done
             if (data.state === 'complete') {
+                if (window.__stopTetris) window.__stopTetris();
                 badge.className = 'text-sm px-3 py-1 rounded bg-green-100 text-green-800';
                 badge.textContent = 'complete';
                 if (indicator) indicator.remove();
@@ -113,6 +187,7 @@
                     </div>`;
                 return; // stop polling
             } else if (data.state === 'error') {
+                if (window.__stopTetris) window.__stopTetris();
                 badge.className = 'text-sm px-3 py-1 rounded bg-red-100 text-red-800';
                 badge.textContent = 'error';
                 if (indicator) indicator.remove();
