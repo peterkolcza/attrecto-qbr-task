@@ -130,7 +130,7 @@ The web dashboard shows:
 Edit `.env` to change settings:
 
 ```bash
-# Provider: "ollama" (default, local) or "anthropic" (cloud)
+# Provider: "ollama" (default, local), "anthropic" (cloud API), or "claude-cli" (OAuth subscription)
 QBR_LLM_PROVIDER=ollama
 
 # Ollama settings
@@ -138,8 +138,20 @@ OLLAMA_HOST=http://localhost:11434
 OLLAMA_MODEL=gemma4:e2b        # 2B model, fast, fits anywhere
 # OLLAMA_MODEL=gemma4:26b      # 26B model, better quality, needs 16GB+ RAM
 
-# Anthropic (if using Claude)
+# Anthropic API (if using provider=anthropic)
 # ANTHROPIC_API_KEY=sk-ant-api03-...
+
+# Claude via CLI (if using provider=claude-cli)
+# Authenticates against your Claude Code subscription, no API key needed.
+# QBR_CLAUDE_CLI_MODEL=opus          # opus | sonnet | haiku, or a full model id
+# QBR_CLAUDE_CLI_TIMEOUT_S=60        # per-call timeout; on miss, falls back to Ollama
+# CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...  # only needed inside Docker / CI; interactive
+                                            # `claude` sessions use the usual OAuth login
+
+# Authentication (optional — set all three to enable the login wall)
+# QBR_AUTH_USER=director
+# QBR_AUTH_PASSWORD_HASH=$2b$12$...   # uv run qbr hash-password '<your-password>'
+# QBR_SESSION_SECRET=<64 hex chars>   # python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
 ### Recommended models by RAM
@@ -182,7 +194,7 @@ The default configuration uses **Ollama with Google's Gemma 4** model family. Th
 - **Good quality**: Gemma 4 (even the 2B variant) handles structured extraction well
 - **Scalable**: on a 24GB Oracle VPS, `gemma4:26b` provides near-cloud quality
 
-### Alternative: Anthropic Claude
+### Alternative: Anthropic Claude (API key)
 
 For production/cloud use, the system supports **Claude Haiku 4.5** (extraction) and **Claude Sonnet 4.6** (synthesis):
 - **Best quality**: Claude excels at structured extraction from messy multilingual text
@@ -190,9 +202,18 @@ For production/cloud use, the system supports **Claude Haiku 4.5** (extraction) 
 - **Structured outputs**: guaranteed schema-valid JSON via tool-use
 - **Cost**: ~$0.40 per run on 18 emails (with Haiku/Sonnet tier split)
 
+### Alternative: Claude via CLI (OAuth subscription)
+
+Third provider — `claude-cli` — shells out to the Claude Code CLI (`claude -p`), authenticating against your Claude subscription instead of burning API budget. Uses **Claude Opus** by default so every call is the top-tier model, at zero marginal cost against the subscription cap.
+
+- **No API key** — authenticates via `CLAUDE_CODE_OAUTH_TOKEN` or a regular interactive `claude` login
+- **Opus quality** — the CLI flag picks the user's default subscription model (defaults to `opus`)
+- **Automatic fallback** — each call has a configurable timeout (default 60s); on timeout or CLI error, the pipeline transparently falls back to the configured local Ollama model so a slow synthesis call never kills a run
+- **Trade-off**: per-call startup latency (~5–8s) and no real token counts (the CLI does not emit them, so usage is estimated from response length)
+
 ### Provider-agnostic design
 
-The `LLMClient` abstraction means any provider works with the same pipeline. Switching is one env var change (`QBR_LLM_PROVIDER`).
+The `LLMClient` abstraction means any provider works with the same pipeline. Switching is one env var change (`QBR_LLM_PROVIDER`). Extraction and synthesis can use different providers via `QBR_EXTRACTION_PROVIDER` / `QBR_SYNTHESIS_PROVIDER` — e.g. Ollama for bulk extraction, Claude for the single final synthesis call.
 
 ## Project Structure
 
@@ -200,7 +221,7 @@ The `LLMClient` abstraction means any provider works with the same pipeline. Swi
 src/qbr/
 ├── cli.py          # Typer CLI with verbose/debug output
 ├── parser.py       # Email parsing, thread grouping, project attribution
-├── llm.py          # LLM client abstraction (Anthropic + Ollama)
+├── llm.py          # LLM client abstraction (Anthropic API, Ollama, Claude CLI + fallback)
 ├── pipeline.py     # 3-stage extraction pipeline
 ├── flags.py        # Attention Flag classification
 ├── security.py     # Prompt injection defense + output grounding
@@ -234,9 +255,29 @@ See [`deploy/README.md`](deploy/README.md) for the full step-by-step guide. Quic
 git clone https://github.com/peterkolcza/attrecto-qbr-task.git
 cd attrecto-qbr-task
 cp .env.prod.example .env
-# Edit .env: set QBR_DOMAIN, optionally ANTHROPIC_API_KEY
+# Edit .env: set QBR_DOMAIN; pick a provider (ollama / anthropic / claude-cli);
+#           if claude-cli, set CLAUDE_CODE_OAUTH_TOKEN; always set the auth vars.
 docker compose up -d --build
 ```
+
+The image ships Node.js + the Claude Code CLI pre-installed so
+`QBR_LLM_PROVIDER=claude-cli` works inside the container — just inject
+`CLAUDE_CODE_OAUTH_TOKEN` at runtime via `.env` / `docker compose config`.
+
+### Live dashboard & drill-down
+
+After an analysis finishes, the `/` dashboard surfaces portfolio health
+without needing the Markdown report open:
+
+- Per-project health pill (Critical / Attention needed / On track),
+  flag counts by severity, and a "last updated" relative timestamp
+- While a job is running, the active project pulses and counts rise
+  incrementally via 3-second polling of `GET /api/projects/state`
+- Clicking a card opens `/projects/{name}` with the full flag list,
+  evidence (quote + source), and a link back to the latest run's
+  full report
+- A big red **Reset to Default** button at the bottom clears all
+  in-memory state so the demo can be re-run from scratch
 
 ## Deliverables
 
