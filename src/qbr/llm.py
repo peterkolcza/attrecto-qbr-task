@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import shutil
+import subprocess
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -292,11 +295,218 @@ class OllamaClient(LLMClient):
         return text
 
 
+class ClaudeCLIClient(LLMClient):
+    """Claude via the `claude` CLI (Claude Code) — billed to the user's OAuth
+    subscription, no API key required.
+
+    Trade-offs vs. AnthropicClient:
+    - No real token counts (estimated from char length, ~4 chars/token).
+    - No prompt caching — the CLI does not expose cache_control.
+    - Slower (CLI startup overhead) but quality matches Claude Opus/Sonnet.
+    - Structured output via schema-in-prompt + JSON parsing (no tool_use).
+
+    Use for demos where API key billing is unwanted, or to tap the
+    subscription's Opus quota.
+    """
+
+    _FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+
+    # Known model aliases accepted by the Claude CLI. Prevents leaking
+    # provider-label strings like "claude-cli (opus)" into --model.
+    _VALID_ALIASES = {"opus", "sonnet", "haiku", "default"}
+
+    def __init__(
+        self,
+        model: str = "opus",
+        tracker: UsageTracker | None = None,
+        binary: str | None = None,
+        timeout_s: int = 60,
+    ) -> None:
+        super().__init__(tracker)
+        self._model = model
+        self._binary = binary or shutil.which("claude") or "claude"
+        self._timeout_s = timeout_s
+
+    def provider_name(self) -> str:
+        return "claude-cli"
+
+    def _resolve_model(self, caller_model: str | None) -> str:
+        """Pick a valid CLI --model value.
+
+        If caller passes a display-label like 'claude-cli (opus)' (from
+        hybrid_clients) we strip it back to the alias inside the parens.
+        """
+        if not caller_model:
+            return self._model
+        m = caller_model.strip()
+        # Peel off a display wrapper like "claude-cli (opus)"
+        paren = re.search(r"\(([^)]+)\)", m)
+        if paren:
+            m = paren.group(1).strip()
+        # Accept aliases, short IDs, or fully-qualified model names
+        if m in self._VALID_ALIASES or m.startswith("claude-"):
+            return m
+        return self._model
+
+    def complete(
+        self,
+        *,
+        system: str,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        response_schema: type[BaseModel] | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        cache_system: bool = False,
+    ) -> str | dict[str, Any]:
+        model_name = self._resolve_model(model)
+
+        # Build prompt. Claude CLI has no separate system/user channels in -p
+        # mode, so we fold the system prompt in as a preamble and rely on the
+        # model to follow it. Schema goes last with explicit "JSON only" guard.
+        parts: list[str] = [system, ""]
+        for m in messages:
+            role = m.get("role", "user").upper()
+            parts.append(f"[{role}]")
+            parts.append(m["content"])
+            parts.append("")
+        if response_schema:
+            schema = json.dumps(response_schema.model_json_schema(), indent=2)
+            parts.append(
+                "Return ONLY a JSON object matching this schema. "
+                "No markdown fences, no prose, just the JSON:\n" + schema
+            )
+        prompt = "\n".join(parts)
+
+        # Note: cannot use --bare because it disables OAuth/keychain and forces
+        # ANTHROPIC_API_KEY. The whole point of this client is to use the
+        # subscription via OAuth, so we accept the extra CLI overhead.
+        cmd = [
+            self._binary,
+            "-p",
+            "--model",
+            model_name,
+            "--output-format",
+            "text",
+            "--disable-slash-commands",
+            "--disallowedTools",
+            "Bash,Edit,Write,WebFetch,WebSearch,Task,Agent",
+        ]
+
+        start = time.monotonic()
+        try:
+            result = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout_s,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"claude CLI timeout after {self._timeout_s}s (model={model_name})"
+            ) from e
+
+        duration = int((time.monotonic() - start) * 1000)
+
+        if result.returncode != 0:
+            stderr_snip = (result.stderr or "").strip()[:500]
+            stdout_snip = (result.stdout or "").strip()[:200]
+            raise RuntimeError(
+                f"claude CLI failed (exit {result.returncode}, model={model_name}): "
+                f"stderr={stderr_snip!r} stdout={stdout_snip!r}"
+            )
+
+        text = result.stdout.strip()
+        # Strip optional markdown fences — the model sometimes wraps JSON in ```
+        fence_match = self._FENCE_RE.match(text)
+        if fence_match:
+            text = fence_match.group(1).strip()
+
+        # Estimate usage — CLI does not expose token counts
+        token_usage = TokenUsage(
+            input_tokens=len(prompt) // 4,
+            output_tokens=len(text) // 4,
+            model=model_name,
+            duration_ms=duration,
+        )
+        self.tracker.record(token_usage)
+
+        if response_schema:
+            return json.loads(text)
+        return text
+
+
+class FallbackClient(LLMClient):
+    """Try a primary LLM client; on failure fall back to a secondary.
+
+    Intended for: Claude Opus (via CLI, OAuth) as primary, Ollama local
+    gemma4 as fallback. Surfaces the switch in the tracker so progress
+    logs can tell the user the call was degraded.
+    """
+
+    def __init__(
+        self,
+        primary: LLMClient,
+        secondary: LLMClient,
+        secondary_model: str | None = None,
+        tracker: UsageTracker | None = None,
+    ) -> None:
+        # Share the primary's tracker so usage rolls up uniformly
+        super().__init__(tracker or primary.tracker)
+        self._primary = primary
+        self._secondary = secondary
+        self._secondary_model = secondary_model
+
+    def provider_name(self) -> str:
+        return f"{self._primary.provider_name()}+fallback:{self._secondary.provider_name()}"
+
+    def complete(
+        self,
+        *,
+        system: str,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        response_schema: type[BaseModel] | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        cache_system: bool = False,
+    ) -> str | dict[str, Any]:
+        try:
+            return self._primary.complete(
+                system=system,
+                messages=messages,
+                model=model,
+                response_schema=response_schema,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                cache_system=cache_system,
+            )
+        except Exception as e:
+            logger.warning(
+                "Primary %s failed (%s) — falling back to %s",
+                self._primary.provider_name(),
+                str(e)[:200],
+                self._secondary.provider_name(),
+            )
+            return self._secondary.complete(
+                system=system,
+                messages=messages,
+                model=self._secondary_model,
+                response_schema=response_schema,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                cache_system=cache_system,
+            )
+
+
 def create_client(
     provider: str = "anthropic",
     api_key: str | None = None,
     ollama_host: str = "http://localhost:11434",
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    claude_cli_model: str = "opus",
     tracker: UsageTracker | None = None,
 ) -> LLMClient:
     """Factory function to create an LLM client based on provider name."""
@@ -304,7 +514,25 @@ def create_client(
         return AnthropicClient(api_key=api_key, tracker=tracker)
     if provider == "ollama":
         return OllamaClient(host=ollama_host, default_model=ollama_model, tracker=tracker)
-    raise ValueError(f"Unknown provider: {provider!r}. Use 'anthropic' or 'ollama'.")
+    if provider == "claude-cli":
+        return ClaudeCLIClient(model=claude_cli_model, tracker=tracker)
+    raise ValueError(f"Unknown provider: {provider!r}. Use 'anthropic', 'ollama', or 'claude-cli'.")
+
+
+def _model_identifier(
+    provider: str, ollama_model: str, claude_cli_model: str, anthropic_model: str
+) -> str:
+    """Model identifier passed back into complete() calls.
+
+    Must be valid for the underlying provider — do NOT wrap in display text.
+    For claude-cli this is the bare alias ('opus'); ClaudeCLIClient will log
+    the friendlier form.
+    """
+    if provider == "ollama":
+        return ollama_model
+    if provider == "claude-cli":
+        return claude_cli_model
+    return anthropic_model
 
 
 def create_hybrid_clients(
@@ -313,6 +541,9 @@ def create_hybrid_clients(
     api_key: str | None = None,
     ollama_host: str = "http://localhost:11434",
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    claude_cli_model: str = "opus",
+    claude_cli_timeout_s: int = 60,
+    claude_cli_fallback: bool = True,
     tracker: UsageTracker | None = None,
 ) -> tuple[LLMClient, str, LLMClient, str]:
     """Create separate clients for extraction and synthesis stages.
@@ -321,6 +552,10 @@ def create_hybrid_clients(
 
     If ANTHROPIC_API_KEY is set but providers are both "ollama",
     auto-upgrades synthesis to Anthropic Sonnet for better quality.
+
+    When `claude-cli` is the chosen provider and `claude_cli_fallback=True`,
+    each client is wrapped in a FallbackClient that falls back to a local
+    Ollama call if the CLI fails or times out.
     """
     tracker = tracker or UsageTracker()
 
@@ -329,22 +564,37 @@ def create_hybrid_clients(
     if api_key and synthesis_provider == "ollama" and extraction_provider == "ollama":
         synthesis_provider = "anthropic"
 
-    extraction_client = create_client(
-        provider=extraction_provider,
-        api_key=api_key,
-        ollama_host=ollama_host,
-        ollama_model=ollama_model,
-        tracker=tracker,
-    )
-    extraction_model = ollama_model if extraction_provider == "ollama" else HAIKU_MODEL
+    def _build(provider: str) -> LLMClient:
+        client = create_client(
+            provider=provider,
+            api_key=api_key,
+            ollama_host=ollama_host,
+            ollama_model=ollama_model,
+            claude_cli_model=claude_cli_model,
+            tracker=tracker,
+        )
+        # Set per-call timeout on claude-cli
+        if isinstance(client, ClaudeCLIClient):
+            client._timeout_s = claude_cli_timeout_s  # noqa: SLF001
+        # Wrap claude-cli in a fallback to local Ollama
+        if provider == "claude-cli" and claude_cli_fallback:
+            fallback = OllamaClient(host=ollama_host, default_model=ollama_model, tracker=tracker)
+            return FallbackClient(
+                primary=client,
+                secondary=fallback,
+                secondary_model=ollama_model,
+                tracker=tracker,
+            )
+        return client
 
-    synthesis_client = create_client(
-        provider=synthesis_provider,
-        api_key=api_key,
-        ollama_host=ollama_host,
-        ollama_model=ollama_model,
-        tracker=tracker,
+    extraction_client = _build(extraction_provider)
+    extraction_model = _model_identifier(
+        extraction_provider, ollama_model, claude_cli_model, HAIKU_MODEL
     )
-    synthesis_model = ollama_model if synthesis_provider == "ollama" else SONNET_MODEL
+
+    synthesis_client = _build(synthesis_provider)
+    synthesis_model = _model_identifier(
+        synthesis_provider, ollama_model, claude_cli_model, SONNET_MODEL
+    )
 
     return extraction_client, extraction_model, synthesis_client, synthesis_model
