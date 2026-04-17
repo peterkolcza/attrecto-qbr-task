@@ -36,7 +36,7 @@ cp .env.example .env
 ### Verify installation
 
 ```bash
-# Run test suite (125 tests)
+# Run test suite
 make test
 
 # Verify LLM connection
@@ -210,7 +210,7 @@ src/qbr/
 
 src/qbr_web/       # FastAPI + HTMX web UI
 prompts/            # Versioned LLM prompt files
-tests/              # 125 tests
+tests/              # full test suite (parser, pipeline, flags, web, auth, security)
 task/sample_data/   # 18 sample email threads + Colleagues.txt
 deploy/             # Oracle VPS deployment runbook + smoke test
 ```
@@ -219,7 +219,7 @@ deploy/             # Oracle VPS deployment runbook + smoke test
 
 ```bash
 make install    # Install all dependencies
-make test       # Run test suite (125 tests)
+make test       # Run full test suite
 make lint       # Ruff lint check
 make format     # Auto-fix lint + format
 make web        # Start web UI dev server
@@ -242,7 +242,7 @@ docker compose up -d --build
 
 - [x] [`Blueprint.md`](Blueprint.md) — architecture, design decisions, trade-offs (5 sections)
 - [x] [`README.md`](README.md) — setup, usage, model justification (this file)
-- [x] Working PoC: 125 tests, CLI + web UI, Docker deployment
+- [x] Working PoC: comprehensive test suite, CLI + web UI, Docker deployment
 
 ## Source Material
 

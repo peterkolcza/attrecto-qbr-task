@@ -323,6 +323,20 @@ def _evict_old_jobs() -> None:
         del jobs[jid]
 
 
+@app.post("/reset")
+async def reset_state(request: Request):
+    """Clear all in-memory state (jobs + project_state) so the demo can be
+    re-run from scratch. Cancels any in-flight analysis tasks first.
+    """
+    for job in jobs.values():
+        task = job.get("_task")
+        if task is not None and not task.done():
+            task.cancel()
+    jobs.clear()
+    project_state.clear()
+    return RedirectResponse(url="/", status_code=303)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     payload = _build_projects_state_payload()

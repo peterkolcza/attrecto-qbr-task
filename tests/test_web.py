@@ -562,6 +562,48 @@ class TestDashboardLiveRender:
             )
 
 
+class TestResetEndpoint:
+    """POST /reset clears jobs + project_state and cancels any in-flight tasks."""
+
+    def test_reset_clears_jobs_and_project_state(self, client):
+        from qbr_web.app import _finalize_project_state, jobs
+
+        # Pre-populate
+        jobs["j1"] = {
+            "id": "j1",
+            "source": "demo",
+            "state": "complete",
+            "progress": [],
+            "result": None,
+            "error": None,
+            "created_at": "2026-04-17T00:00:00+00:00",
+            "active_project": None,
+        }
+        _finalize_project_state({"Project Phoenix": []}, job_id="j1")
+
+        from qbr_web.app import project_state
+
+        assert len(jobs) == 1
+        assert "Project Phoenix" in project_state
+
+        resp = client.post("/reset", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/"
+
+        assert jobs == {}
+        assert project_state == {}
+
+    def test_reset_redirects_to_dashboard(self, client):
+        resp = client.post("/reset")  # follow redirect
+        assert resp.status_code == 200
+        assert "Portfolio Overview" in resp.text
+
+    def test_reset_button_rendered_on_dashboard(self, client):
+        resp = client.get("/")
+        assert 'action="/reset"' in resp.text
+        assert "Reset to Default" in resp.text
+
+
 class TestProjectDrilldown:
     """Unit 5: GET /projects/{name} drill-down page."""
 
