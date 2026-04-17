@@ -474,6 +474,14 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
             )
         )
 
+        # Suffix appended to "Extracting with X..." progress messages so the
+        # user sees the timeout + fallback path in the log, not just the model.
+        extraction_hint = (
+            f" (timeout {claude_cli_timeout_s}s, fallback: {ollama_fallback_model})"
+            if extraction_provider == "claude-cli"
+            else ""
+        )
+
         # Step 1: Parse
         _log_progress(job, "Parsing emails...")
         threads = await asyncio.to_thread(parse_all_emails, input_dir)
@@ -514,7 +522,7 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
                 f"  Project: {thread.project or 'Unknown'} "
                 f"({len(thread.messages)} msgs, {off_topic_count} off-topic)",
             )
-            _log_progress(job, f"  Extracting with {extraction_model}...")
+            _log_progress(job, f"  Extracting with {extraction_model}{extraction_hint}...")
 
             try:
                 items, metrics = await asyncio.to_thread(
