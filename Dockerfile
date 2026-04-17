@@ -29,8 +29,22 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Create non-root user
-RUN groupadd -r qbr && useradd -r -g qbr -d /app -s /sbin/nologin qbr
+# Create non-root user. Need a real shell (/bin/bash) and a writable HOME
+# so `claude` CLI (when QBR_LLM_PROVIDER=claude-cli) can boot. Default was
+# /sbin/nologin which blocks CLI subprocesses.
+RUN groupadd -r qbr && useradd -r -g qbr -d /app -s /bin/bash qbr
+
+# Install Node.js + Claude Code CLI so QBR_LLM_PROVIDER=claude-cli works.
+# The CLI authenticates via CLAUDE_CODE_OAUTH_TOKEN env var — no API key,
+# no interactive login. Token is injected at runtime via docker-compose
+# env_file, never baked into the image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && apt-get purge -y curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy virtual environment and app from builder
 COPY --from=builder /app/.venv /app/.venv
@@ -42,9 +56,10 @@ COPY --from=builder /app/pyproject.toml /app/pyproject.toml
 # Set PATH to use the virtual environment
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/src"
+ENV HOME="/app"
 
-# Create reports directory
-RUN mkdir -p /app/reports && chown -R qbr:qbr /app
+# Create reports directory + claude config dir (claude writes session files there)
+RUN mkdir -p /app/reports /app/.claude && chown -R qbr:qbr /app
 
 USER qbr
 
