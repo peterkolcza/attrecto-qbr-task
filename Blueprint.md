@@ -283,6 +283,7 @@ The system treats all email content as **untrusted input** per OWASP LLM Top 10 
 | **Batch API** (production) | Additional 50% discount | Offline report generation via Anthropic Batch API |
 | **Deterministic Stage C** | Zero LLM cost for aging/severity | Python date arithmetic + heuristics |
 | **Off-topic filtering** | Fewer tokens per thread | Social messages excluded before LLM sees them |
+| **OAuth subscription (demo path)** | Zero marginal cost against a Claude Pro/Max cap | `QBR_LLM_PROVIDER=claude-cli` shells out to `claude -p`, billing against the CLAUDE_CODE_OAUTH_TOKEN subscription instead of an API key |
 
 **Combined effect (production):** Prompt caching + Batch API + Haiku tier = ~95% cost reduction vs naive Sonnet calls for every step.
 
@@ -290,6 +291,8 @@ The system treats all email content as **untrusted input** per OWASP LLM Top 10 
 - ~36 Haiku calls (2 per thread) × ~2K tokens each ≈ 72K input + 36K output → $0.25
 - 1 Sonnet synthesis call × ~8K tokens → $0.15
 - **Total per run: ~$0.40**
+
+**Zero-marginal-cost alternative for demos:** Running the same pipeline with `QBR_LLM_PROVIDER=claude-cli` (Opus via Claude Code OAuth) consumes subscription quota instead of API budget — useful when shipping a live demo to reviewers without handing out an API key.
 
 ### Robustness
 
@@ -299,8 +302,10 @@ The system treats all email content as **untrusted input** per OWASP LLM Top 10 
 - The Director/PM sees the evidence chain and decides which source is authoritative
 
 **Against LLM unreliability:**
-- Retry with exponential backoff (3 attempts)
+- Retry with exponential backoff (3 attempts) on transient Anthropic API errors
 - Ollama fallback for local/offline operation
+- **Cross-provider fallback** (`FallbackClient`): when Claude CLI times out or errors mid-run, the pipeline transparently falls back to local Ollama for that single call and continues. The fallback is logged (`Primary claude-cli failed — falling back to ollama`), so the user can see exactly which calls degraded and decide whether to re-run.
+- Configurable per-call timeout (`QBR_CLAUDE_CLI_TIMEOUT_S`, default 60s) — protects against CLI sessions that silently stall
 - Token usage logging per call for anomaly detection
 - Conservative resolution bias ("ambiguous" > "resolved")
 
@@ -364,4 +369,8 @@ This is the most dangerous failure mode because it's **silent**: unlike a crash 
 
 **The risk:** The system depends on Anthropic's API. If the API is down or rate-limited during the Director's QBR preparation, the report cannot be generated.
 
-**Mitigation:** Ollama local fallback for degraded-quality but available results. Cached last-known-good reports are always accessible. Batch API pre-generation (run the report overnight, not on-demand).
+**Mitigation:** Multi-layered provider strategy:
+- Ollama local fallback for degraded-quality but always-available results (no external dependency at all)
+- `FallbackClient` wrapper around `claude-cli` transparently routes failed/timed-out calls to local Ollama mid-run — a flaky network or a stuck CLI session no longer ends the pipeline, it just downgrades individual calls
+- Cached last-known-good reports are always accessible via the `reports/` directory and the "Analysis History" card on the dashboard
+- Batch API pre-generation for production (run the report overnight, not on-demand)
