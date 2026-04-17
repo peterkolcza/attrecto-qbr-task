@@ -8,8 +8,10 @@ WORKDIR /app
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy dependency files first (cache layer)
-COPY pyproject.toml ./
+# Copy dependency files first (cache layer).
+# README.md is referenced by pyproject.toml's [project.readme] and is required
+# by hatchling during the "install the project itself" step below.
+COPY pyproject.toml README.md ./
 
 # Install dependencies
 RUN uv sync --no-dev --extra web --no-install-project
