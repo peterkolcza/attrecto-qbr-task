@@ -448,13 +448,28 @@ async def _run_analysis(job_id: str, input_dir: Path) -> None:
     try:
         provider = os.getenv("QBR_LLM_PROVIDER", "ollama")
         tracker = UsageTracker()
+        extraction_provider = os.getenv("QBR_EXTRACTION_PROVIDER", provider)
+        synthesis_provider = os.getenv("QBR_SYNTHESIS_PROVIDER", provider)
+        claude_cli_model = os.getenv("QBR_CLAUDE_CLI_MODEL", "opus")
+        claude_cli_timeout_s = int(os.getenv("QBR_CLAUDE_CLI_TIMEOUT_S", "60"))
+        ollama_fallback_model = os.getenv("OLLAMA_MODEL", "gemma4:e2b")
+
+        if "claude-cli" in (extraction_provider, synthesis_provider):
+            _log_progress(
+                job,
+                f"Using Claude {claude_cli_model} via CLI (OAuth subscription, "
+                f"timeout {claude_cli_timeout_s}s, fallback: {ollama_fallback_model})",
+            )
+
         extraction_client, extraction_model, synthesis_client, synthesis_model = (
             create_hybrid_clients(
-                extraction_provider=os.getenv("QBR_EXTRACTION_PROVIDER", provider),
-                synthesis_provider=os.getenv("QBR_SYNTHESIS_PROVIDER", provider),
+                extraction_provider=extraction_provider,
+                synthesis_provider=synthesis_provider,
                 api_key=os.getenv("ANTHROPIC_API_KEY"),
                 ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-                ollama_model=os.getenv("OLLAMA_MODEL", "gemma4:e2b"),
+                ollama_model=ollama_fallback_model,
+                claude_cli_model=claude_cli_model,
+                claude_cli_timeout_s=claude_cli_timeout_s,
                 tracker=tracker,
             )
         )
